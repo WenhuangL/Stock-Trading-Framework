@@ -8,9 +8,12 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 import yfinance as yf
-# from pprint import pprint
+from pprint import pprint
 import csv
 import time
+import pandas as pd
+import sqlite3
+from datetime import date
 
 
 def scrape_yahoo_fin_stocks():
@@ -113,6 +116,7 @@ def scrape_yahoo_fin_stocks():
 
         time.sleep(0.2)
 
+    save_to_sql(cats, data, "yahoo_table")
     with open("yahoofin_data.csv", "w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         writer.writerow(cats)
@@ -190,7 +194,7 @@ def scrape_msn_money_stocks():
 
 
     driver.quit()
-
+    save_to_sql(facts_list, facts_val_list, "msn_table")
     with open("msn_money_data.csv", "w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         writer.writerow(facts_list)
@@ -236,10 +240,28 @@ def scrape_msn_money_simple():
     return ticker_list
 
 
+def save_to_sql(cats, data, table_name):
+    data_temp = []
+    today = date.today()
+
+    for n in range(len(data)):
+        temp = {}
+        #for cat in cats:
+        for i in range(len(cats)):
+            temp[cats[i]] = data[n][i]
+        temp['date'] = today
+        data_temp.append(temp)
+    #pprint(data_temp)
+    df = pd.DataFrame(data_temp)
+    conn = sqlite3.connect('analysis.db')
+    df.to_sql(table_name, conn, if_exists='append', index=False)
+
+
 def main():
 
-    print(scrape_msn_money_simple())
+    #print(scrape_msn_money_simple())
 
+    
     setting = input("Would you like to scrape yahoo finance(1) or MSN money(2) or MSN money simple(3)?")
     if setting == "1":
         scrape_yahoo_fin_stocks()
@@ -249,7 +271,6 @@ def main():
         print(scrape_msn_money_simple())
     else:
         print("Invalid input")
-
 
 if __name__ == "__main__":
     main()
