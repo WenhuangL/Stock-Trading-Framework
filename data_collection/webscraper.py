@@ -16,7 +16,7 @@ import sqlite3
 from datetime import date
 import re
 from typing import List, Optional
-from datetime import date
+from pathlib import Path
 
 
 SESSION = requests.Session()
@@ -325,22 +325,27 @@ def save_to_sql(cats: List[str], data: List[List], table_name: str) -> None:
 
     for n in range(len(data)):
         temp = {}
-        #for cat in cats:
         for i in range(len(cats)):
             temp[cats[i]] = data[n][i]
         temp['date'] = today
         data_temp.append(temp)
-    #pprint(data_temp)
+
     df = pd.DataFrame(data_temp)
-    conn = sqlite3.connect('analysis.db')
+
+    folder_path = Path("analysis")
+    folder_path.mkdir(parents=True, exist_ok=True)
+    db_file_path = folder_path / 'analysis.db'
+
+    conn = sqlite3.connect(db_file_path)
     df.to_sql(table_name, conn, if_exists='append', index=False)
+    conn.close()
 
 
 def main():
 
     #print(scrape_msn_money_simple())
 
-    
+
     setting = input("Would you like to scrape yahoo finance(1) or MSN money(2) or MSN money simple(3)?")
     if setting == "1":
         scrape_yahoo_fin_stocks()

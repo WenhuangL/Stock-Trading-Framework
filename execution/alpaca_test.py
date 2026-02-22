@@ -18,8 +18,8 @@ stock_list = ["APPL", "TSLA", "GOOG", "NVDA", "AMZN", "META", "MSFT"]  # change 
 
 # Check account data
 # Fill keys with respective paper trading account
-API_KEY = "PKOATS2ITDVL3KE5R2PWQXCL2E"
-SECRET_KEY = "Hz9S5MB5vpRHoz68CS1tQe3fWLJMokR5oN6sUn9pTJRw"
+API_KEY = "API_KEY"
+SECRET_KEY = "SECRET_KEY"
 trading_client = TradingClient(API_KEY, SECRET_KEY)
 account = trading_client.get_account()
 
@@ -73,66 +73,6 @@ def prev():
 
     # Test trades 2
     print("Test trades 2")
-
-    '''for stock in stock_list:
-        print(stock)
-        allocated_cash = round(float(account.cash)/(len(stock_list) * 1.2))
-        print(allocated_cash, "dollars allocated")
-        limit_price = round(latest_trades[stock].price)  # (latest_quotes[stock].ask_price + latest_quotes[stock].bid_price)/2
-        if limit_price == 0:
-            continue
-        print(limit_price, "dollars limit price")
-        buy_amount = allocated_cash//limit_price
-        print(buy_amount, "shares")
-    
-        # Save this as some point
-        limit_order_data = LimitOrderRequest(
-            symbol=stock,
-            qty=buy_amount,
-            side=OrderSide.BUY,
-            time_in_force=TimeInForce.FOK,  # Currently fill or kill, used to be DAY
-            limit_price=limit_price,
-            extended_hours=True
-        )
-    
-        limit_order = trading_client.submit_order(limit_order_data)
-    
-    order_params = GetOrdersRequest(
-        status=QueryOrderStatus.OPEN,
-    )
-    positions = trading_client.get_all_positions()
-    print("Positions:")
-    print(positions)
-    time.sleep(1.5)
-    
-    # Set stop loss/take profit
-    for position in positions:
-        take_profit_data = TakeProfitRequest(
-            limit_price=round(float(position.avg_entry_price) * 1.02, 2)
-        )
-        stop_loss_data = StopLossRequest(
-            stop_price=round(float(position.avg_entry_price) * 0.98, 2)
-            # You could also add a limit_price here to make it a stop-limit
-            # limit_price=144.90
-        )
-        try:
-            bracket_order_data = MarketOrderRequest(
-                symbol=position.symbol,
-                qty=position.qty,
-                side=OrderSide.BUY,
-                time_in_force=TimeInForce.GTC,  # Good 'Til Canceled (common for brackets)
-                order_class=OrderClass.BRACKET,  # This makes it a bracket order
-                take_profit=take_profit_data,  # Attach the take-profit
-                stop_loss=stop_loss_data  # Attach the stop-loss
-            )
-    
-            # --- 4. Submit the Order ---
-            submitted_order = trading_client.submit_order(order_data=bracket_order_data)
-            print(f"Successfully submitted BRACKET order for {submitted_order.symbol}.")
-            print(f"  Order ID: {submitted_order.id}")
-    
-        except Exception as e:
-            print(f"An error occurred submitting the bracket order: {e}")'''
 
     try:
         cash_per_stock = float(account.cash) / (len(stock_list) * 1.2)
@@ -189,26 +129,6 @@ def prev():
     print("\n--- All orders submitted ---")
     for order in submitted_orders:
         print(f"ID: {order.id}, Symbol: {order.symbol}, Status: {order.status}")
-
-    # Stream then test sell
-    '''stream = StockDataStream("PKOATS2ITDVL3KE5R2PWQXCL2E", "Hz9S5MB5vpRHoz68CS1tQe3fWLJMokR5oN6sUn9pTJRw")
-    
-    async def handle_stream(data):
-        print(data)
-        positions = trading_client.get_all_positions()
-        if positions == {}:
-            print("No open position, stopping stream")
-            asyncio.create_task(stream.stop_ws())
-        if data.timestamp.hour >= 16:
-            print("Time's up, closing all positions")
-            asyncio.create_task(stream.stop_ws())
-    
-        if data.price >= round(latest_trades[data.symbol].price * 1.02, 2) or data.price >= round(latest_trades[data.symbol].price * 0.98, 2):
-            trading_client.close_position(data.symbol)
-    
-    
-    stream.subscribe_trades(handle_stream, *positions)
-    stream.run()'''
 
 
 def get_historical_data(symbol):
