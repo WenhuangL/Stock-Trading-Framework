@@ -14,9 +14,76 @@ import time
 import pandas as pd
 import sqlite3
 from datetime import date
+import re
+from typing import List, Optional
+from datetime import date
 
 
-def scrape_yahoo_fin_stocks():
+SESSION = requests.Session()
+SESSION.headers.update(
+    {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+)
+
+# Helpers
+def _is_valid_ticker(symbol: str) -> bool:
+    return bool(re.fullmatch(r"[A-Z]{1,5}", symbol.strip()))
+
+
+def _clean(tickers: List[str]) -> List[str]:
+    seen = set()
+    result = []
+    for t in tickers:
+        t = t.strip().upper()
+        if t and _is_valid_ticker(t) and t not in seen:
+            seen.add(t)
+            result.append(t)
+    return sorted(result)
+
+
+def scrape_nasdaq(today: str) -> List[str]:
+    """
+    Fetch earnings from Nasdaq's public API endpoint.
+    *today* should be in 'YYYY-MM-DD' format.
+    """
+    url = (
+        "https://api.nasdaq.com/api/calendar/earnings"
+        f"?date={today}"
+    )
+    headers = {
+        **SESSION.headers,
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://www.nasdaq.com/",
+        "Origin": "https://www.nasdaq.com",
+    }
+    tickers: List[str] = []
+    try:
+        resp = SESSION.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        rows = (
+            data.get("data", {})
+                .get("rows", [])
+        )
+        for row in rows:
+            symbol = row.get("symbol", "")
+            if symbol:
+                tickers.append(symbol)
+        # log.info("Nasdaq         → %d raw tickers", len(tickers))
+        print(f"Nasdaq         → {len(tickers)} raw tickers")
+    except Exception as exc:
+        # log.warning("Nasdaq scrape failed: %s", exc)
+        print(f"Nasdaq scrape failed: {exc}")
+    return tickers
+
+
+def scrape_yahoo_fin_stocks() -> None:
     sort_condition = input("What would you like to sort by?")
 
     cats = [
@@ -38,19 +105,19 @@ def scrape_yahoo_fin_stocks():
     # List to store the scraped data
     data = []
 
-    def yahoo_api_request(url, params):
+    def yahoo_api_request(url: str, params: dict) -> Optional[dict]:
         r = requests.get(url, headers=headers, params=params)
         if r.status_code != 200:
             return None
         return r.json()
 
     # Helper to calculate % change
-    def calc_pct_change(current, old):
+    def calc_pct_change(current: float, old: float) -> str:
         if old == 0: return "N/A"
         change = ((current - old) / old) * 100
         return f"{change:.2f}%"
 
-    def scrape_stock_details(symbol):
+    def scrape_stock_details(symbol: str) -> Optional[List]:
         try:
             ticker = yf.Ticker(symbol)
 
@@ -106,15 +173,17 @@ def scrape_yahoo_fin_stocks():
 
     quotes = screener["finance"]["result"][0]["quotes"]
 
-    for q in quotes:
-        symbol = q["symbol"]
-        print(f"Processing {symbol}...")
+    raw_symbols = [q.get("symbol", "") for q in quotes]
+    valid_symbols = _clean(raw_symbols)
+    print(f"{len(raw_symbols)} tickers returned; {len(valid_symbols)} passed validation.")
 
-        details = scrape_stock_details(symbol)
+    for symbol in valid_symbols:
+        print(f"Processing {symbol}...")
+        details: Optional[List] = scrape_stock_details(symbol)
         if details:
             data.append(details)
-
         time.sleep(0.2)
+
 
     save_to_sql(cats, data, "yahoo_table")
     with open("yahoofin_data.csv", "w", newline="", encoding="utf-8") as file:
@@ -125,7 +194,7 @@ def scrape_yahoo_fin_stocks():
     print("Success! Data saved to 'yahoofin_data.csv'.")
 
 
-def scrape_msn_money_stocks():
+def scrape_msn_money_stocks() -> None:
     try:
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service)
@@ -134,7 +203,7 @@ def scrape_msn_money_stocks():
         print("If this fails, download ChromeDriver and place it in your script's directory.")
         driver = webdriver.Chrome()
 
-    wait = WebDriverWait(driver, 15)
+    # wait = WebDriverWait(driver, 15)
 
     sort_condition = "Losers"
     sort_condition_temp = input("What condition would you like to sort the data by?")
@@ -172,8 +241,15 @@ def scrape_msn_money_stocks():
         stock.click()
         driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", stock)
         time.sleep(1)
+
         symbol = driver.find_element(By.CLASS_NAME, "symbolWithBtn-DS-EntryPoint1-1").text
         print(f"Scraping {stock.text}")
+
+        if not _is_valid_ticker(symbol):
+            print(f"  ↳ Skipping '{symbol}' — failed ticker validation.")
+            continue
+
+        symbol = symbol.strip().upper()
         price = driver.find_element(By.CSS_SELECTOR, ".mainPrice").text
 
         facts_elements = driver.find_elements(By.CLASS_NAME, "factsRowKey-DS-EntryPoint1-1")
@@ -204,7 +280,7 @@ def scrape_msn_money_stocks():
 
 
 # Returns just a list of all the ticker names of the sort condition
-def scrape_msn_money_simple():
+def scrape_msn_money_simple() -> List[str]:
     try:
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service)
@@ -216,12 +292,13 @@ def scrape_msn_money_simple():
     wait = WebDriverWait(driver, 15)
 
     sort_condition = "Losers"
+    """
     sort_condition_temp = input("What condition would you like to sort the data by?")
 
     if sort_condition_temp.lower() == "losers" or sort_condition_temp.lower() == "gainers":  # can add another 'or' if they want full shabang data or just ticker name
         sort_condition = sort_condition_temp.capitalize()
     else:
-        print("Sort condition not recognized, defaulting to losers")
+        print("Sort condition not recognized, defaulting to losers")"""
 
     driver.get(f"https://int1.msn.com/en-us/money/markets?tab=Top{sort_condition}")  # Capital L Loser
 
@@ -237,10 +314,12 @@ def scrape_msn_money_simple():
     for element in driver.find_elements(By.CLASS_NAME, "secTitle-DS-EntryPoint1-3"):
         ticker_list.append(element.text)
 
-    return ticker_list
+    driver.quit()
+
+    return _clean(ticker_list)
 
 
-def save_to_sql(cats, data, table_name):
+def save_to_sql(cats: List[str], data: List[List], table_name: str) -> None:
     data_temp = []
     today = date.today()
 
