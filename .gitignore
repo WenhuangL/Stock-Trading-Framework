@@ -1,0 +1,27 @@
+# API credentials — never commit
+config.py
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Local data cache (large parquet files downloaded from Alpaca)
+data_collection/cache/
+
+# Session logs and personal output (too large / personal)
+output/*.log
+output/*.csv
+output/trades.db
+
+# Debug / scratch files
+debug_eod.py
+
+# Claude Code internal
+.claude/

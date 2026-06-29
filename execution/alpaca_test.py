@@ -1,16 +1,16 @@
-import asyncio
-from alpaca.data.requests import StockQuotesRequest, StockTradesRequest, StockBarsRequest, StockLatestQuoteRequest, StockLatestTradeRequest
+from alpaca.data.requests import StockBarsRequest, StockLatestQuoteRequest, StockLatestTradeRequest
 from alpaca.data.timeframe import TimeFrame
-from alpaca.data.live import StockDataStream
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.trading import OrderSide
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, GetOrdersRequest, TakeProfitRequest, StopLossRequest
-from alpaca.trading.enums import TimeInForce, OrderType, QueryOrderStatus, OrderStatus, OrderClass
+from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest, TakeProfitRequest, StopLossRequest
+from alpaca.trading.enums import TimeInForce, OrderClass
 import datetime
 from zoneinfo import ZoneInfo
-import pandas as pd
-import time
+from indicators.analyze import calculate_rsi, summarize, generate_signals
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
 
 ny_timezone = ZoneInfo("America/New_York")
 # market closes: 1/1, third mon in jan, third mon in feb, 
@@ -18,8 +18,10 @@ stock_list = ["APPL", "TSLA", "GOOG", "NVDA", "AMZN", "META", "MSFT"]  # change 
 
 # Check account data
 # Fill keys with respective paper trading account
-API_KEY = "API_KEY"
-SECRET_KEY = "SECRET_KEY"
+API_KEY = config.API_KEY
+SECRET_KEY = config.SECRET_KEY
+#API_KEY = "API_KEY"
+#SECRET_KEY = "SECRET_KEY"
 trading_client = TradingClient(API_KEY, SECRET_KEY)
 account = trading_client.get_account()
 
@@ -147,22 +149,6 @@ def get_historical_data(symbol):
     return bars.df
 
 
-def calculate_rsi(data, period=14):
-    close = data['close']
-
-    delta = close.diff()
-
-    gain = (delta.where(delta > 0, 0))
-    loss = (-delta.where(delta < 0, 0))
-
-    avg_gain = gain.ewm(alpha=1 / period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
-
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-
-    return rsi
-
 
 def execute_trade(signal, symbol):
     if signal == "buy":
@@ -187,25 +173,27 @@ def execute_trade(signal, symbol):
 
 
 def main():
-
     for stock in stock_list:
         print(f"Analyzing {stock}...")
 
         df = get_historical_data(stock)
 
-        df['RSI'] = calculate_rsi(df)
+        # Full indicator summary (RSI + MACD + Bollinger + signals)
+        summarize(df, symbol=stock)
 
-        current_rsi = df['RSI'].iloc[-1]
-        print(f"Current RSI: {current_rsi:.2f}")
+        # RSI-only signal for quick trade decisions
+        current_rsi = calculate_rsi(df).iloc[-1]
+        print(f"RSI (14): {current_rsi:.2f}")
 
         if current_rsi < 30:
             print("Signal: OVERSOLD (Buy Opportunity)")
             # execute_trade("buy", stock)  # Uncomment to trade
         elif current_rsi > 70:
             print("Signal: OVERBOUGHT (Sell Opportunity)")
-            # execute_trade("sell", stock) # Uncomment to trade
+            # execute_trade("sell", stock)  # Uncomment to trade
         else:
             print("Signal: NEUTRAL (No Action)")
+
 
 
 if __name__ == "__main__":
