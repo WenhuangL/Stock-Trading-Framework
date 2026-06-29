@@ -140,6 +140,7 @@ def main() -> None:
     from risk.risk_manager import RiskManager, RiskConfig
     from data_collection.stock_universe import UniverseSelector, UniverseConfig
     from strategies.strategy_eod_reversion import EodReversionStrategy, EodReversionConfig
+    from strategies.strategy_swing import SwingStrategy, SwingConfig
 
     tc = TradingClient(API_KEY, SECRET_KEY, paper=PAPER)
     dc = StockHistoricalDataClient(API_KEY, SECRET_KEY)
@@ -165,7 +166,25 @@ def main() -> None:
         log.error("Empty universe — aborting EOD session.")
         sys.exit(1)
 
-    # ── Run strategy ──────────────────────────────────────────────────────────
+    # ── 3:45 PM: Swing strategy evening scan (10 min before EOD opens) ───────
+    # Captures today's closing data to generate breakout signals for tomorrow's
+    # open.  Saves pending entries to output/swing_pending.json — non-fatal if
+    # it fails so the EOD session is never blocked.
+    log.info("Running swing evening scan...")
+    swing = SwingStrategy(
+        trading_client  = tc,
+        data_client     = dc,
+        config          = SwingConfig(),
+        risk_manager    = rm,
+        universe_config = ucfg,
+    )
+    try:
+        swing_signals = swing.evening_scan(tickers=tickers)
+        log.info(f"Swing scan: {len(swing_signals)} signal(s) queued for tomorrow.")
+    except Exception as exc:
+        log.warning(f"Swing scan failed (non-fatal): {exc}")
+
+    # ── Run EOD reversion strategy ────────────────────────────────────────────
     ecfg     = EodReversionConfig()
     strategy = EodReversionStrategy(
         trading_client  = tc,

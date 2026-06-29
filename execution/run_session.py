@@ -153,6 +153,7 @@ def main() -> None:
     from risk.risk_manager import RiskManager, RiskConfig, build_and_cache_sector_map
     from data_collection.stock_universe import UniverseConfig
     from strategies.strategy_intraday import IntradayStrategy, IntradayConfig
+    from strategies.strategy_swing import SwingStrategy, SwingConfig
 
     tc = TradingClient(API_KEY, SECRET_KEY, paper=PAPER)
     dc = StockHistoricalDataClient(API_KEY, SECRET_KEY)
@@ -163,6 +164,7 @@ def main() -> None:
 
     rm       = RiskManager(tc, dc, API_KEY, SECRET_KEY, config=rcfg)
     strategy = IntradayStrategy(tc, dc, rm, config=icfg, universe_config=ucfg)
+    swing    = SwingStrategy(tc, dc, config=SwingConfig(), risk_manager=rm, universe_config=ucfg)
 
     # Ensure sector map is in the universe cache (used by risk manager)
     build_and_cache_sector_map()
@@ -182,6 +184,16 @@ def main() -> None:
         sys.exit(0)
 
     log.info("Pre-session checks passed. Starting live session.")
+
+    # ── 9:31 AM: Execute pending swing entries + start swing monitor thread ───
+    # The swing strategy runs in a background thread so it doesn't block the
+    # intraday session. It exits on its own at 3:45 PM (before the EOD scan).
+    _wait_until("09:31", "swing morning session")
+    log.info("Starting swing morning session in background thread...")
+    import threading
+    swing_thread = threading.Thread(target=swing.morning_session, daemon=True,
+                                    name="swing-monitor")
+    swing_thread.start()
 
     # ── 9:30 AM → 3:55 PM: Run all intraday phases ───────────────────────────
     _wait_until("09:30", "market open")

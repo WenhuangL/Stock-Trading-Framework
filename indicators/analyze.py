@@ -346,6 +346,76 @@ def calculate_historical_volatility(data: pd.DataFrame, period: int = 20) -> pd.
     return log_returns.rolling(window=period).std() * np.sqrt(252)
 
 
+def calculate_donchian_channel(data: pd.DataFrame, period: int = 20) -> pd.DataFrame:
+    """
+    Donchian Channel (N-day price channel).
+
+    Returns the highest high and lowest low over a rolling window.
+    Used by the swing strategy to identify price breakouts above/below
+    the recent range without look-ahead bias.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Must contain 'high', 'low', and 'close' columns.
+    period : int
+        Look-back window in bars (default 20).
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: 'upper' (period high), 'lower' (period low),
+                 'mid' (average of upper and lower).
+        Note: the current bar is excluded from the channel so that a
+        breakout on today's close does not compare against today's bar
+        (avoids trivial same-bar membership).
+    """
+    upper = data["high"].shift(1).rolling(window=period).max()
+    lower = data["low"].shift(1).rolling(window=period).min()
+    mid   = (upper + lower) / 2
+    return pd.DataFrame({"upper": upper, "lower": lower, "mid": mid}, index=data.index)
+
+
+def calculate_atr_percentile(
+    data: pd.DataFrame,
+    atr_period: int = 14,
+    lookback: int = 60,
+) -> pd.Series:
+    """
+    ATR Percentile — current ATR ranked within its recent distribution.
+
+    Returns a value in [0, 1] where 0.0 means the current ATR is at
+    the lowest point of the lookback window and 1.0 means the highest.
+    Values below 0.35 indicate a volatility contraction (squeeze).
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Must contain 'high', 'low', and 'close' columns.
+    atr_period : int
+        Period for the ATR calculation (default 14).
+    lookback : int
+        Rolling window over which to rank the current ATR (default 60).
+
+    Returns
+    -------
+    pd.Series
+        Percentile rank of current ATR, values in [0, 1].
+    """
+    atr = calculate_atr(data, period=atr_period)
+
+    def _rank(window):
+        if len(window) < 2:
+            return np.nan
+        current = window.iloc[-1]
+        mn, mx = window.min(), window.max()
+        if mx == mn:
+            return 0.5
+        return float((current - mn) / (mx - mn))
+
+    return atr.rolling(window=lookback).apply(_rank, raw=False)
+
+
 def calculate_relative_volume(data: pd.DataFrame, lookback: int = 20) -> pd.Series:
     """
     Relative Volume (RVOL).
