@@ -73,6 +73,7 @@ import numpy as np
 import pandas as pd
 
 from alpaca.data.historical import StockHistoricalDataClient
+from alpaca.data.enums import DataFeed
 from alpaca.data.requests import (
     StockBarsRequest,
     StockLatestTradeRequest,
@@ -314,7 +315,7 @@ class IntradayStrategy:
             batch = self._universe[i : i + BATCH]
             try:
                 snaps = self.dc.get_stock_snapshots(
-                    StockSnapshotRequest(symbol_or_symbols=batch)
+                    StockSnapshotRequest(symbol_or_symbols=batch, feed=DataFeed.IEX)
                 )
                 for sym, snap in snaps.items():
                     if not snap.daily_bar or not snap.prev_daily_bar:
@@ -395,7 +396,7 @@ class IntradayStrategy:
         """Returns SPY gap fraction (positive = up, negative = down)."""
         try:
             snaps = self.dc.get_stock_snapshots(
-                StockSnapshotRequest(symbol_or_symbols=["SPY", "QQQ"])
+                StockSnapshotRequest(symbol_or_symbols=["SPY", "QQQ"], feed=DataFeed.IEX)
             )
             changes = []
             for sym in ["SPY", "QQQ"]:
@@ -524,6 +525,7 @@ class IntradayStrategy:
                 timeframe         = TimeFrame.Minute,
                 start             = start_dt,
                 end               = datetime.datetime.now(ET),
+                feed              = DataFeed.IEX,
             ))
         except Exception as exc:
             self.log.warning(f"ORB bar fetch failed: {exc}")
@@ -649,6 +651,7 @@ class IntradayStrategy:
                 timeframe         = TimeFrame.Minute,
                 start             = start_dt,
                 end               = datetime.datetime.now(ET),
+                feed              = DataFeed.IEX,
             ))
         except Exception as exc:
             self.log.warning(f"VWAP bar fetch failed: {exc}")
@@ -667,6 +670,7 @@ class IntradayStrategy:
                     start             = datetime.datetime.combine(
                         datetime.date.today(), datetime.time(9, 30), tzinfo=ET),
                     end               = datetime.datetime.now(ET),
+                    feed              = DataFeed.IEX,
                 ))
                 spy_df = _extract_symbol_df(spy_resp, "SPY")
                 if spy_df is not None and len(spy_df) >= 30:
@@ -820,6 +824,7 @@ class IntradayStrategy:
                 timeframe         = TimeFrame.Minute,
                 start             = start_dt,
                 end               = datetime.datetime.now(ET),
+                feed              = DataFeed.IEX,
             ))
         except Exception as exc:
             self.log.warning(f"Power bar fetch failed: {exc}")

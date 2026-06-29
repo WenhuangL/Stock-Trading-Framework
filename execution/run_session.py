@@ -147,6 +147,21 @@ def main() -> None:
         log.info("Weekend — session aborted.")
         sys.exit(0)
 
+    # ── Post-market guard: sleep until next session to avoid restart loop ─────
+    # Without this, the always-on task exits after market close and PythonAnywhere
+    # immediately relaunches it, causing it to spin every ~5 minutes all night.
+    now = _now_et()
+    if now.hour >= 16:
+        next_start = (now + datetime.timedelta(days=1)).replace(
+            hour=7, minute=55, second=0, microsecond=0
+        )
+        while next_start.weekday() >= 5:
+            next_start += datetime.timedelta(days=1)
+        sleep_secs = (next_start - now).total_seconds()
+        log.info(f"Post-market — sleeping {sleep_secs / 3600:.1f}h until next session.")
+        time.sleep(sleep_secs)
+        return  # PythonAnywhere restarts; new instance runs the full session
+
     # ── Initialise clients ────────────────────────────────────────────────────
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.trading.client import TradingClient
