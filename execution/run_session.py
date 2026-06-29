@@ -22,15 +22,16 @@ PYTHONANYWHERE SETUP
          python /home/<username>/run_session.py
   3. Separately, add a scheduled task at 15:55 ET (20:55 UTC in summer):
          python /home/<username>/run_eod.py
-  4. Add a weekly task (Monday 07:00 ET) to rebuild the universe:
-         python /home/<username>/rebuild_universe.py
+  4. Add a daily task at 12:00 UTC to rebuild the universe:
+         python /home/<username>/Stock-Trading-Framework/execution/rebuild_universe.py
+         (MIN_REBUILD_AGE_DAYS in rebuild_universe.py controls actual frequency)
   5. Set your API keys in config.py (never hardcode them here).
 
 FILE LAYOUT
 -----------
   run_session.py       ← this file (intraday session)
   run_eod.py           ← EOD reversion (separate PythonAnywhere task)
-  rebuild_universe.py  ← weekly universe rebuild (see bottom of this file)
+  rebuild_universe.py  ← daily universe rebuild (MIN_REBUILD_AGE_DAYS controls frequency)
   config.py            ← API keys and shared settings (not in version control)
   strategy_intraday.py
   strategy_eod_reversion.py

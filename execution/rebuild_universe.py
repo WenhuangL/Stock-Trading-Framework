@@ -1,19 +1,19 @@
 """
 rebuild_universe.py
 -------------------
-Weekly scheduled task to force-rebuild the scored stock universe and refresh
+Daily scheduled task to force-rebuild the scored stock universe and refresh
 the sector map in the cache.
 
-PythonAnywhere scheduled task: Every Monday at 7:00 AM ET (12:00 UTC summer /
+PythonAnywhere scheduled task: Every day at 7:00 AM ET (12:00 UTC summer /
 13:00 UTC winter). This runs before the trading session (run_session.py starts
-at 7:55 AM) so the intraday and EOD strategies always consume a fresh universe
-at the start of each trading week.
+at 7:55 AM). The MIN_REBUILD_AGE_DAYS constant controls how often a full
+rebuild actually happens — set to 1 for daily, 7 for weekly.
 
 PYTHONANYWHERE SETUP
 --------------------
   Tasks → Scheduled → Add:
-    Time: 12:00 UTC (Mon only)
-    Command: python /home/<username>/rebuild_universe.py
+    Time: 12:00 UTC (every day)
+    Command: python /home/<username>/Stock-Trading-Framework/execution/rebuild_universe.py
 
 What this script does
 ---------------------
@@ -35,6 +35,10 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 ET = ZoneInfo("America/New_York")
+
+# How many days old the cache must be before a rebuild is triggered.
+# PythonAnywhere is scheduled daily — set to 1 for true daily, 7 for weekly.
+MIN_REBUILD_AGE_DAYS = 1
 
 
 # =============================================================================
@@ -98,6 +102,19 @@ def main() -> None:
     # top_n=150 gives the strategies a large pool to choose from
     ucfg     = UniverseConfig(top_n=150)
     selector = UniverseSelector(dc, ucfg)
+
+    # ── Check cache freshness before doing the expensive rebuild ──────────────
+    _cache = Path(ucfg.cache_path)
+    if _cache.exists():
+        age_days = (datetime.datetime.now().timestamp() - _cache.stat().st_mtime) / 86400
+        if age_days < MIN_REBUILD_AGE_DAYS:
+            log.info(
+                f"Cache is {age_days:.1f}d old (threshold={MIN_REBUILD_AGE_DAYS}d) — skipping rebuild."
+            )
+            sys.exit(0)
+        log.info(f"Cache is {age_days:.1f}d old — proceeding with rebuild.")
+    else:
+        log.info("No cache found — running initial build.")
 
     # ── Force full rebuild (ignores cache TTL) ────────────────────────────────
     log.info("Starting full universe rebuild (use_cache=False)...")
