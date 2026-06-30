@@ -441,17 +441,21 @@ def main() -> None:
         log.warning(f"Could not find {eod_universe_path}. EOD backtest will use static universe.")
 
     historical_universes_rsi2 = None
-    rsi2_universe_path = os.path.join("output", "historical_universes_rsi2.json")
-    if os.path.exists(rsi2_universe_path):
-        with open(rsi2_universe_path, "r") as f:
-            historical_universes_rsi2 = json.load(f)
-        log.info(f"Loaded RSI-2 PIT universes from {rsi2_universe_path}")
-    else:
+    for rsi2_universe_path in [
+        os.path.join("output", "historical_universes_rsi2_bidir.json"),
+        os.path.join("output", "historical_universes_rsi2.json"),
+    ]:
+        if os.path.exists(rsi2_universe_path):
+            with open(rsi2_universe_path, "r") as f:
+                historical_universes_rsi2 = json.load(f)
+            log.info(f"Loaded RSI-2 PIT universes from {rsi2_universe_path}")
+            break
+    if historical_universes_rsi2 is None:
         log.warning(
-            f"Could not find {rsi2_universe_path}. "
+            "Could not find RSI-2 PIT universe. "
             "RSI-2 backtest will use static universe. "
             "Run: python data_collection/build_historical_universes.py "
-            "--sma200-filter --out output/historical_universes_rsi2.json "
+            "--universe sp500 --out output/historical_universes_rsi2_bidir.json "
             "--start <date> --end <date>"
         )
 
