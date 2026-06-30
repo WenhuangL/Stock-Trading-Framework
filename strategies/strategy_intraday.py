@@ -432,12 +432,24 @@ class IntradayStrategy:
         self.log.info("Phase 2: VWAP Reversion")
         self._phase_vwap(portfolio_value)
 
-        # ── Gap (2:30 – 3:05 PM): only monitor existing positions ─────────────
-        _wait_until("15:05")
-
-        # ── Phase 3: Power Hour ───────────────────────────────────────────────
-        self.log.info("Phase 3: Power Hour")
-        self._phase_power(portfolio_value)
+        # ── Gap (2:30 – 3:55 PM): monitor existing positions, no new entries ────
+        # Power Hour disabled for paper testing — remove the `if False` block and
+        # restore the original two lines below to re-enable:
+        #   _wait_until("15:05")
+        #   self.log.info("Phase 3: Power Hour")
+        #   self._phase_power(portfolio_value)
+        if False:
+            _wait_until("15:05")
+            self.log.info("Phase 3: Power Hour")
+            self._phase_power(portfolio_value)
+        else:
+            self.log.info("Power Hour disabled — monitoring existing positions until 3:55 PM.")
+            hard_close = _parse_time_today(self.cfg.power_hard_close)
+            while datetime.datetime.now(ET) < hard_close:
+                self._shared_monitor()
+                time.sleep(self.cfg.monitor_interval_sec)
+            for pos in [p for p in self._positions if not p.get("closed", False)]:
+                self._close_live_position(pos, reason="session_end")
 
         # Final close — anything still open at 3:55 PM
         remaining = [p for p in self._positions if not p.get("closed", False)]

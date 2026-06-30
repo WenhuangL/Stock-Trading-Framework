@@ -23,9 +23,12 @@ initial_cash figure and reports:
 
 USAGE
 -----
-    python run_backtest.py
+    python run_backtest.py                              # all three strategies (default)
+    python run_backtest.py --strategies intraday        # intraday only
+    python run_backtest.py --strategies eod swing       # skip intraday
+    python run_backtest.py --strategies swing --split   # swing, in/out-of-sample
 
-    # Or with custom tickers / date range:
+    # Custom date range:
     python run_backtest.py --start 2023-06-01 --end 2023-12-31
 
 REQUIREMENTS
@@ -79,53 +82,63 @@ DEFAULT_CASH       = 100_000.0
 # COMBINED SUMMARY PRINTER
 # =============================================================================
 
+_ALL_STRATEGIES = frozenset({"intraday", "eod", "swing"})
+
+
 def _print_combined_summary(
     intraday_results: dict,
     eod_results:      dict,
     initial_cash:     float,
     swing_results:    dict = None,
+    strategies:       frozenset = _ALL_STRATEGIES,
 ) -> None:
-    id_summary    = intraday_results.get("summary", {})
-    eod_summary   = eod_results.get("summary", {})
-    swing_summary = (swing_results or {}).get("summary", {})
+    id_summary    = intraday_results.get("summary", {}) if "intraday" in strategies else {}
+    eod_summary   = eod_results.get("summary", {})      if "eod"      in strategies else {}
+    swing_summary = (swing_results or {}).get("summary", {}) if "swing" in strategies else {}
 
-    id_trades   = id_summary.get("num_trades", 0)
-    id_final    = id_summary.get("final_value", initial_cash)
-    id_start    = id_summary.get("initial_cash", initial_cash)
-    id_pnl      = id_final - id_start
+    id_trades = id_summary.get("num_trades", 0)
+    id_pnl    = id_summary.get("final_value", initial_cash) - id_summary.get("initial_cash", initial_cash)
 
-    eod_trades  = eod_summary.get("num_trades", 0)
-    eod_pnl     = eod_summary.get("total_pnl",
-                    eod_summary.get("final_value", initial_cash) - initial_cash)
+    eod_trades = eod_summary.get("num_trades", 0)
+    eod_pnl    = eod_summary.get("total_pnl",
+                   eod_summary.get("final_value", initial_cash) - initial_cash)
 
-    sw_trades   = swing_summary.get("num_trades", 0)
-    sw_pnl      = swing_summary.get("final_value", initial_cash) - initial_cash \
-                  if swing_summary else 0.0
+    sw_trades = swing_summary.get("num_trades", 0)
+    sw_pnl    = swing_summary.get("final_value", initial_cash) - initial_cash if swing_summary else 0.0
 
     combined     = id_pnl + eod_pnl + sw_pnl
     combined_pct = (combined / initial_cash) * 100 if initial_cash else 0
+    total_trades = id_trades + eod_trades + sw_trades
 
+    title = "BACKTEST SUMMARY" if len(strategies) == 1 else "COMBINED BACKTEST SUMMARY"
     print("\n" + "=" * 70)
-    print("  COMBINED BACKTEST SUMMARY")
+    print(f"  {title}")
     print("=" * 70)
     print(f"  {'Strategy':<25}  {'Trades':>7}  {'P&L':>12}  {'Return':>8}")
     print(f"  {'-'*25}  {'-'*7}  {'-'*12}  {'-'*8}")
-    print(f"  {'Intraday (ORB+VWAP+PH)':<25}  {id_trades:>7}  "
-          f"${id_pnl:>+11,.2f}  {id_pnl/initial_cash*100:>+7.2f}%")
-    print(f"  {'EOD Reversion':<25}  {eod_trades:>7}  "
-          f"${eod_pnl:>+11,.2f}  {eod_pnl/initial_cash*100:>+7.2f}%")
-    print(f"  {'Swing Breakout':<25}  {sw_trades:>7}  "
-          f"${sw_pnl:>+11,.2f}  {sw_pnl/initial_cash*100:>+7.2f}%")
-    print(f"  {'-'*25}  {'-'*7}  {'-'*12}  {'-'*8}")
-    print(f"  {'COMBINED':<25}  {id_trades+eod_trades+sw_trades:>7}  "
-          f"${combined:>+11,.2f}  {combined_pct:>+7.2f}%")
+    if "intraday" in strategies:
+        print(f"  {'Intraday (ORB+VWAP+PH)':<25}  {id_trades:>7}  "
+              f"${id_pnl:>+11,.2f}  {id_pnl/initial_cash*100:>+7.2f}%")
+    if "eod" in strategies:
+        print(f"  {'EOD Reversion':<25}  {eod_trades:>7}  "
+              f"${eod_pnl:>+11,.2f}  {eod_pnl/initial_cash*100:>+7.2f}%")
+    if "swing" in strategies:
+        print(f"  {'Swing Breakout':<25}  {sw_trades:>7}  "
+              f"${sw_pnl:>+11,.2f}  {sw_pnl/initial_cash*100:>+7.2f}%")
+    if len(strategies) > 1:
+        print(f"  {'-'*25}  {'-'*7}  {'-'*12}  {'-'*8}")
+        print(f"  {'COMBINED':<25}  {total_trades:>7}  "
+              f"${combined:>+11,.2f}  {combined_pct:>+7.2f}%")
     print(f"\n  Starting capital: ${initial_cash:,.0f}")
     print(f"  Ending estimate:  ${initial_cash + combined:,.0f}")
     print("=" * 70 + "\n")
 
-    detail_rows = [("INTRADAY DETAIL", id_summary),
-                   ("EOD DETAIL", eod_summary)]
-    if swing_summary:
+    detail_rows = []
+    if "intraday" in strategies:
+        detail_rows.append(("INTRADAY DETAIL", id_summary))
+    if "eod" in strategies:
+        detail_rows.append(("EOD DETAIL", eod_summary))
+    if "swing" in strategies and swing_summary:
         detail_rows.append(("SWING DETAIL", swing_summary))
 
     for label, summary in detail_rows:
@@ -177,84 +190,95 @@ def _run_period(
     label, start_date, end_date, *,
     tc, dc, rm, ucfg, tickers,
     hu_intraday, hu_eod, cash, show_charts,
+    strategies: frozenset = _ALL_STRATEGIES,
 ):
-    """Run intraday + EOD + swing backtests for one date range and print results."""
-    from strategies.strategy_intraday import IntradayStrategy, IntradayConfig
-    from strategies.strategy_eod_reversion import EodReversionStrategy, EodReversionConfig
-    from strategies.strategy_swing import SwingStrategy, SwingConfig
-
+    """Run selected strategy backtests for one date range and print results."""
     log.info("=" * 60)
-    log.info(f"  Backtest Runner - {label}")
+    log.info(f"  Backtest Runner - {label}  [{', '.join(sorted(strategies))}]")
     log.info("=" * 60)
     log.info(f"  Tickers:  {len(tickers)} stocks")
     log.info(f"  Period:   {start_date} -> {end_date}")
     log.info(f"  Capital:  ${cash:,.0f}")
     log.info("")
 
-    # ── Intraday ──────────────────────────────────────────────────────────────
-    log.info("-" * 60)
-    log.info("  Running IntradayStrategy.backtest()...")
-    log.info("-" * 60)
-    intraday = IntradayStrategy(
-        trading_client=tc, data_client=dc, risk_manager=rm,
-        config=IntradayConfig(), universe_config=ucfg,
-    )
     intraday_results: dict = {}
-    try:
-        intraday_results = intraday.backtest(
-            tickers=tickers, start_date=start_date, end_date=end_date,
-            initial_cash=cash, historical_universes=hu_intraday,
+    eod_results:      dict = {}
+    swing_results:    dict = {}
+    intraday = eod = swing = None
+
+    # ── Intraday ──────────────────────────────────────────────────────────────
+    if "intraday" in strategies:
+        from strategies.strategy_intraday import IntradayStrategy, IntradayConfig
+        log.info("-" * 60)
+        log.info("  Running IntradayStrategy.backtest()...")
+        log.info("-" * 60)
+        intraday = IntradayStrategy(
+            trading_client=tc, data_client=dc, risk_manager=rm,
+            config=IntradayConfig(), universe_config=ucfg,
         )
-        intraday.print_summary(intraday_results)
-    except Exception as exc:
-        log.exception(f"Intraday backtest failed: {exc}")
+        try:
+            intraday_results = intraday.backtest(
+                tickers=tickers, start_date=start_date, end_date=end_date,
+                initial_cash=cash, historical_universes=hu_intraday,
+            )
+            intraday.print_summary(intraday_results)
+        except Exception as exc:
+            log.exception(f"Intraday backtest failed: {exc}")
 
     # ── EOD ───────────────────────────────────────────────────────────────────
-    log.info("-" * 60)
-    log.info("  Running EodReversionStrategy.backtest()...")
-    log.info("-" * 60)
-    eod = EodReversionStrategy(
-        trading_client=tc, data_client=dc, config=EodReversionConfig(),
-        universe_config=ucfg, risk_manager=rm,
-    )
-    eod_results: dict = {}
-    try:
-        eod_results = eod.backtest(
-            tickers=tickers, start_date=start_date, end_date=end_date,
-            initial_cash=cash, historical_universes=hu_eod,
+    if "eod" in strategies:
+        from strategies.strategy_eod_reversion import EodReversionStrategy, EodReversionConfig
+        log.info("-" * 60)
+        log.info("  Running EodReversionStrategy.backtest()...")
+        log.info("-" * 60)
+        eod = EodReversionStrategy(
+            trading_client=tc, data_client=dc, config=EodReversionConfig(),
+            universe_config=ucfg, risk_manager=rm,
         )
-        eod.print_summary(eod_results)
-    except Exception as exc:
-        log.exception(f"EOD backtest failed: {exc}")
+        try:
+            eod_results = eod.backtest(
+                tickers=tickers, start_date=start_date, end_date=end_date,
+                initial_cash=cash, historical_universes=hu_eod,
+            )
+            eod.print_summary(eod_results)
+        except Exception as exc:
+            log.exception(f"EOD backtest failed: {exc}")
 
     # ── Swing ─────────────────────────────────────────────────────────────────
-    log.info("-" * 60)
-    log.info("  Running SwingStrategy.backtest()...")
-    log.info("-" * 60)
-    swing = SwingStrategy(
-        trading_client=tc, data_client=dc, config=SwingConfig(),
-        risk_manager=rm, universe_config=ucfg,
-    )
-    swing_results: dict = {}
-    try:
-        swing_results = swing.backtest(
-            tickers=tickers, start_date=start_date, end_date=end_date,
-            initial_cash=cash, historical_universes=hu_intraday,
+    if "swing" in strategies:
+        from strategies.strategy_swing import SwingStrategy, SwingConfig
+        log.info("-" * 60)
+        log.info("  Running SwingStrategy.backtest()...")
+        log.info("-" * 60)
+        swing = SwingStrategy(
+            trading_client=tc, data_client=dc, config=SwingConfig(),
+            risk_manager=rm, universe_config=ucfg,
         )
-        swing.print_summary(swing_results)
-    except Exception as exc:
-        log.exception(f"Swing backtest failed: {exc}")
+        try:
+            swing_results = swing.backtest(
+                tickers=tickers, start_date=start_date, end_date=end_date,
+                initial_cash=cash, historical_universes=hu_intraday,
+            )
+            swing.print_summary(swing_results)
+        except Exception as exc:
+            log.exception(f"Swing backtest failed: {exc}")
 
-    # ── Combined + benchmark ──────────────────────────────────────────────────
-    _print_combined_summary(intraday_results, eod_results, cash, swing_results)
+    # ── Summary + benchmark ───────────────────────────────────────────────────
+    _print_combined_summary(
+        intraday_results, eod_results, cash, swing_results, strategies=strategies,
+    )
 
     spy_pct = _spy_benchmark_pct(dc, start_date, end_date)
     if spy_pct is not None:
-        id_pct  = intraday_results.get("summary", {}).get("total_return_pct", 0.0)
-        eod_pct = eod_results.get("summary", {}).get("total_return_pct", 0.0)
-        sw_pct  = swing_results.get("summary", {}).get("total_return_pct", 0.0)
+        parts = []
+        if "intraday" in strategies:
+            parts.append(f"Intraday {intraday_results.get('summary', {}).get('total_return_pct', 0.0):+.2f}%")
+        if "eod" in strategies:
+            parts.append(f"EOD {eod_results.get('summary', {}).get('total_return_pct', 0.0):+.2f}%")
+        if "swing" in strategies:
+            parts.append(f"Swing {swing_results.get('summary', {}).get('total_return_pct', 0.0):+.2f}%")
         print(f"  BENCHMARK — SPY buy & hold ({label}): {spy_pct:+.2f}%")
-        print(f"    vs Intraday {id_pct:+.2f}%  |  vs EOD {eod_pct:+.2f}%  |  vs Swing {sw_pct:+.2f}%")
+        print(f"    vs {' | vs '.join(parts)}")
         print("=" * 70 + "\n")
 
     # ── Persist trade records to SQLite ──────────────────────────────────────
@@ -273,17 +297,17 @@ def _run_period(
 
     if show_charts:
         log.info("Generating charts (close each window to continue)...")
-        if intraday_results:
+        if intraday and intraday_results:
             try:
                 intraday.plot_backtest(intraday_results)
             except Exception as exc:
                 log.warning(f"Intraday plot failed: {exc}")
-        if eod_results:
+        if eod and eod_results:
             try:
                 eod.plot_backtest(eod_results)
             except Exception as exc:
                 log.warning(f"EOD plot failed: {exc}")
-        if swing_results:
+        if swing and swing_results:
             try:
                 swing.plot_backtest(swing_results)
             except Exception as exc:
@@ -299,7 +323,7 @@ def _run_period(
 def main() -> None:
     # ── CLI argument parsing ──────────────────────────────────────────────────
     parser = argparse.ArgumentParser(
-        description="Run intraday + EOD backtests on the same ticker list and date range."
+        description="Run intraday + EOD + swing backtests on the same ticker list and date range."
     )
     parser.add_argument("--start",  default=DEFAULT_START,  help="Start date YYYY-MM-DD")
     parser.add_argument("--end",    default=DEFAULT_END,    help="End date   YYYY-MM-DD")
@@ -310,7 +334,15 @@ def main() -> None:
     parser.add_argument("--split", action="store_true",
                         help="Split the date range in half and report in-sample vs "
                              "out-of-sample separately (guards against overfitting).")
+    parser.add_argument(
+        "--strategies", nargs="*",
+        choices=["intraday", "eod", "swing"], default=["intraday", "eod", "swing"],
+        help="Which strategies to backtest (default: all). "
+             "Examples: --strategies intraday  --strategies eod swing",
+    )
     args = parser.parse_args()
+
+    strategies = frozenset(args.strategies)
 
     start_date = args.start
     end_date   = args.end
@@ -439,6 +471,7 @@ def main() -> None:
             hu_intraday=historical_universes_intraday,
             hu_eod=historical_universes_eod,
             cash=cash, show_charts=show_charts,
+            strategies=strategies,
         )
 
     log.info("run_backtest.py complete.")
