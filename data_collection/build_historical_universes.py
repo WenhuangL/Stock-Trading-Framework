@@ -95,13 +95,14 @@ def get_sp400_tickers() -> List[str]:
         log.error(f"Failed to fetch S&P 400 list: {exc}")
         return []
 
-def fetch_bulk_daily_data(tickers: List[str], start: str, end: str) -> pd.DataFrame:
+def fetch_bulk_daily_data(tickers: List[str], start: str, end: str, pad_days: int = 60) -> pd.DataFrame:
     """
     Fetch daily bars for all tickers using yfinance.
-    We pad the start date by 60 days to ensure the very first week in the
-    requested range has enough historical data to calculate 30-day moving averages.
+    We pad the start date by pad_days to ensure the very first week in the
+    requested range has enough historical data to calculate moving averages.
+    Use pad_days=250 when sma200_filter=True so SMA(200) has adequate history.
     """
-    start_dt = pd.to_datetime(start) - pd.Timedelta(days=60)
+    start_dt = pd.to_datetime(start) - pd.Timedelta(days=pad_days)
     end_dt = pd.to_datetime(end) + pd.Timedelta(days=1)  # Inclusive end
 
     log.info(f"Downloading daily data for {len(tickers)} tickers ({start_dt.date()} to {end_dt.date()})...")
@@ -145,10 +146,14 @@ def _minmax(series: pd.Series) -> pd.Series:
     return (series - mn) / (mx - mn)
 
 
-def calculate_weekly_scores(df: pd.DataFrame, top_n: int) -> dict:
+def calculate_weekly_scores(df: pd.DataFrame, top_n: int, sma200_filter: bool = False) -> dict:
     """
     Calculate the universe scores vector-style across all dates and tickers,
     sample the scores every Friday, and extract the top N tickers per week.
+
+    When sma200_filter=True, only stocks trading above their 200-day SMA are
+    eligible for selection each week.  Requires fetch_bulk_daily_data to be
+    called with pad_days >= 250 so the SMA has adequate warm-up history.
     """
     log.info("Calculating rolling indicators (Volume, Volatility, Momentum)...")
 
@@ -173,13 +178,20 @@ def calculate_weekly_scores(df: pd.DataFrame, top_n: int) -> dict:
     # 4. Momentum (20-day return)
     mom_20 = (close / df.groupby('symbol')['close'].shift(20)) - 1
 
+    # 5. SMA(200) filter flag (only computed when requested)
+    score_dict = {'vol_30': vol_30, 'rvol': rvol, 'hv_20': hv_20, 'mom_20': mom_20}
+    if sma200_filter:
+        sma200_raw = df.groupby('symbol')['close'].rolling(200).mean()
+        sma200_raw.index = sma200_raw.index.droplevel(0)
+        # Positional comparison: both arrays derived from same df in same row order.
+        # close > NaN evaluates to False in numpy, so early rows (no SMA yet) are
+        # automatically excluded from the filter.
+        above_arr = (df['close'].values > sma200_raw.values)
+        score_dict['above_sma200'] = pd.Series(above_arr, index=vol_30.index)
+        log.info("SMA(200) filter enabled — stocks below 200-day MA will be excluded.")
+
     # Combine into a single scoring DataFrame
-    scores = pd.DataFrame({
-        'vol_30': vol_30,
-        'rvol': rvol,
-        'hv_20': hv_20,
-        'mom_20': mom_20
-    }).dropna()
+    scores = pd.DataFrame(score_dict).dropna()
 
     log.info("Sampling scores on week-ending days and ranking...")
 
@@ -203,6 +215,13 @@ def calculate_weekly_scores(df: pd.DataFrame, top_n: int) -> dict:
     for week in weeks:
         week_data = weekly_final_scores[weekly_final_scores['iso_week'] == week].copy()
 
+        # Apply SMA(200) filter BEFORE ranking so only qualifying stocks compete.
+        if sma200_filter and 'above_sma200' in week_data.columns:
+            week_data = week_data[week_data['above_sma200'] == True]
+            if week_data.empty:
+                historical_map[week] = []
+                continue
+
         # Apply Min-Max normalization cross-sectionally for this specific week
         score_vol = _minmax(week_data['vol_30'])
         score_mom = _minmax(week_data['mom_20'])
@@ -215,6 +234,7 @@ def calculate_weekly_scores(df: pd.DataFrame, top_n: int) -> dict:
         score_hv = np.exp(-0.5 * ((week_data['hv_20'] - target_hv) / decay) ** 2)
 
         # Composite score (Matching stock_universe.py weights)
+        week_data = week_data.copy()
         week_data['composite'] = (
                 0.35 * score_vol +
                 0.30 * score_hv +
@@ -242,7 +262,15 @@ def main():
                         help="Specific list of tickers (e.g. AAPL MSFT). If omitted, uses S&P 500.")
     parser.add_argument("--top-n", type=int, default=100, help="Number of stocks to select per week (default 100)")
     parser.add_argument("--out", type=str, default="output/historical_universes.json", help="Output JSON path")
-    parser.add_argument("--universe", choices=["sp500", "sp400", "combined"],default="sp500")
+    parser.add_argument("--universe", choices=["sp500", "sp400", "combined"], default="sp500")
+    parser.add_argument(
+        "--sma200-filter", action="store_true",
+        help=(
+            "Only include stocks trading above their 200-day SMA in each week's "
+            "selection.  Intended for the RSI-2 strategy universe.  Use with "
+            "--out output/historical_universes_rsi2.json."
+        ),
+    )
 
     args = parser.parse_args()
     # 1. Determine the ticker list
@@ -262,14 +290,15 @@ def main():
             log.error("No tickers provided and universe fetch failed. Exiting.")
             return
 
-    # 2. Fetch the data
-    df = fetch_bulk_daily_data(tickers, args.start, args.end)
+    # 2. Fetch the data (pad extra history for SMA(200) warm-up when needed)
+    pad_days = 250 if args.sma200_filter else 60
+    df = fetch_bulk_daily_data(tickers, args.start, args.end, pad_days=pad_days)
     if df.empty:
         log.error("No data fetched. Check date range or ticker symbols.")
         return
 
     # 3. Calculate scores and build the map
-    universe_map = calculate_weekly_scores(df, top_n=args.top_n)
+    universe_map = calculate_weekly_scores(df, top_n=args.top_n, sma200_filter=args.sma200_filter)
 
     # 4. Save to JSON
     out_path = Path(args.out)
