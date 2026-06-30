@@ -593,13 +593,19 @@ class IntradayStrategy:
                 else:
                     continue
 
-                budget = portfolio_value * self.cfg.orb_position_size_pct
-                qty    = int(budget // price)
+                sl_per_share = abs(entry - sl)
+                if sl_per_share > 0:
+                    risk_dollars = portfolio_value * self.cfg.orb_risk_per_trade_pct
+                    max_qty      = int((portfolio_value * self.cfg.orb_max_notional_pct) / price)
+                    qty          = min(int(risk_dollars / sl_per_share), max_qty)
+                else:
+                    qty = int((portfolio_value * self.cfg.orb_max_notional_pct) / price)
                 if qty < 1:
                     continue
+                notional = qty * price
 
                 ok, reason = self.rm.check_ok_to_enter(
-                    sym, self._positions, budget, portfolio_value
+                    sym, self._positions, notional, portfolio_value
                 )
                 if not ok:
                     self.log.debug(f"ORB entry blocked for {sym}: {reason}")
@@ -770,13 +776,19 @@ class IntradayStrategy:
         for score, sym, params in scored:
             if vwap_count >= self.cfg.vwap_max_positions:
                 break
-            budget = portfolio_value * self.cfg.vwap_position_size_pct
-            price  = params["entry"]
-            qty    = int(budget // price)
+            price   = params["entry"]
+            sl_dist = abs(price - params["sl"])
+            if sl_dist > 0:
+                risk_dollars = portfolio_value * self.cfg.vwap_risk_per_trade_pct
+                max_qty      = int((portfolio_value * self.cfg.vwap_max_notional_pct) / price)
+                qty          = min(int(risk_dollars / sl_dist), max_qty)
+            else:
+                qty = int((portfolio_value * self.cfg.vwap_max_notional_pct) / price)
             if qty < 1:
                 continue
+            notional = qty * price
             ok, reason = self.rm.check_ok_to_enter(
-                sym, self._positions, budget, portfolio_value
+                sym, self._positions, notional, portfolio_value
             )
             if not ok:
                 continue
