@@ -119,6 +119,18 @@ class Rsi2Config:
     exit_rsi_short: float = 40.0
     """Queue short exit (cover) when RSI(2) closes BELOW this (normalised)."""
 
+    # ── Short-side quality filters ────────────────────────────────────────────
+    use_spy_regime_filter: bool = True
+    """Disable ALL short signals when SPY is above its own SMA(200).
+    When the broad market is in a bull regime, overbought bounces on individual
+    stocks tend to extend rather than revert.  SPY is fetched automatically."""
+
+    sma_death_cross_period: int = 50
+    """Require SMA(short) < SMA(trend) on the candidate stock before shorting.
+    Default 50: SMA(50) < SMA(200) = confirmed death cross.  This filters out
+    stocks that are merely in a brief correction below SMA(200) but whose
+    50-day trend is still bullish."""
+
     # ── Trend / exit filters ───────────────────────────────────────────────────
     sma_trend_period: int = 200
     """Directional router.  Long only when price > SMA(N); short only when
@@ -263,6 +275,14 @@ class Rsi2Strategy:
         if np.isnan(sma200_val) or last_close >= sma200_val:
             return None
 
+        # Death-cross filter: SMA(50) must be below SMA(200).
+        # Rejects stocks only in a brief correction below SMA(200) while their
+        # 50-day trend is still rising — those bounces tend to extend, not revert.
+        sma50_ser = calculate_sma(df, period=self.cfg.sma_death_cross_period)
+        sma50_val = float(sma50_ser.iloc[-1])
+        if np.isnan(sma50_val) or sma50_val >= sma200_val:
+            return None
+
         rsi_ser  = calculate_rsi(df, period=self.cfg.rsi_period)
         last_rsi = float(rsi_ser.iloc[-1])
         if np.isnan(last_rsi) or last_rsi <= self.cfg.short_thresh:
@@ -274,6 +294,7 @@ class Rsi2Strategy:
             "signal_price": round(last_close, 4),
             "rsi2":         round(last_rsi, 2),
             "sma200":       round(sma200_val, 4),
+            "sma50":        round(sma50_val, 4),
             "avg_volume":   round(avg_vol, 0),
         }
 
@@ -366,17 +387,22 @@ class Rsi2Strategy:
 
         Returns dict with 'equity_curve', 'trades', and 'summary'.
         """
+        need_spy = self.cfg.enable_shorts and self.cfg.use_spy_regime_filter
         self.log.info(
-            "RSI-2 backtest: %s to %s | %d tickers | $%s | shorts=%s",
+            "RSI-2 backtest: %s to %s | %d tickers | $%s | shorts=%s | spy_regime=%s | death_cross=%s",
             start_date, end_date, len(tickers),
             f"{initial_cash:,.0f}", self.cfg.enable_shorts,
+            self.cfg.use_spy_regime_filter, self.cfg.sma_death_cross_period,
         )
 
         start_dt    = datetime.datetime.fromisoformat(start_date).replace(tzinfo=ET)
         end_dt      = datetime.datetime.fromisoformat(end_date).replace(tzinfo=ET)
         fetch_start = start_dt - datetime.timedelta(days=self.cfg.min_history_bars + 30)
 
-        daily_data   = self._fetch_daily_bars(tickers, fetch_start, end_dt)
+        fetch_tickers = list(tickers)
+        if need_spy and "SPY" not in fetch_tickers:
+            fetch_tickers.append("SPY")
+        daily_data   = self._fetch_daily_bars(fetch_tickers, fetch_start, end_dt)
         trading_days = pd.bdate_range(start_date, end_date)
 
         cash            = initial_cash
@@ -556,6 +582,20 @@ class Rsi2Strategy:
             open_symbols = {p["symbol"] for p in open_pos} | set(pending_entries.keys())
             open_count   = len(open_pos) + len(pending_entries)
 
+            # SPY regime check: disable short entries when the broad market is
+            # in a bull regime (SPY > SMA(200)).  Computed once per day.
+            shorts_allowed = self.cfg.enable_shorts
+            if shorts_allowed and self.cfg.use_spy_regime_filter and "SPY" in daily_data:
+                try:
+                    spy_hist    = daily_data["SPY"].loc[:day_str]
+                    spy_sma200  = calculate_sma(spy_hist, period=self.cfg.sma_trend_period)
+                    spy_close   = float(spy_hist["close"].iloc[-1])
+                    spy_sma_val = float(spy_sma200.iloc[-1])
+                    if not np.isnan(spy_sma_val) and spy_close > spy_sma_val:
+                        shorts_allowed = False  # bull regime — no new short entries
+                except (KeyError, IndexError):
+                    pass
+
             if open_count < self.cfg.max_positions:
                 long_signals:  list[dict] = []
                 short_signals: list[dict] = []
@@ -573,7 +613,7 @@ class Rsi2Strategy:
                     sig = self._check_signal(sym, hist)
                     if sig is not None:
                         long_signals.append(sig)
-                    elif self.cfg.enable_shorts:
+                    elif shorts_allowed:
                         # A stock can't be both RSI<10 and RSI>90 simultaneously,
                         # so elif avoids the redundant second RSI computation.
                         short_sig = self._check_short_signal(sym, hist)
