@@ -135,9 +135,13 @@ class IntradayConfig:
     120 = 7:30–9:30 AM ET window. Extend to 240 to catch overnight headlines."""
 
     # ── Phase 2: VWAP Reversion ────────────────────────────────────────────────
-    vwap_entry_start:      str   = "11:00" # don't enter before this (morning volatility)
-    vwap_entry_cutoff:     str   = "14:30" # no new entries after 2 PM
-    vwap_phase_end:        str   = "15:00"
+    # EXPERIMENT (reversion-windows branch): widened to the full session to test
+    # whether the reversion edge extends into the 9:45-11:00 AM and 3:00-3:55 PM
+    # windows. Baseline (11:00-14:30 window) = +9.43%. Segment results by entry
+    # time to see which windows actually carry edge before locking these in.
+    vwap_entry_start:      str   = "09:45" # was 11:00 — test morning reversion
+    vwap_entry_cutoff:     str   = "15:45" # was 14:30 — test afternoon/close reversion
+    vwap_phase_end:        str   = "15:55"  # was 15:00 — hold into the close
     vwap_extension_atr:    float = 2.50   # price must be > N×ATR from VWAP
     vwap_sl_atr:           float = 1.40   # SL if extends further to this multiple
     vwap_tp_pct:           float = 0.002  # TP within 0.2% of VWAP
@@ -153,18 +157,20 @@ class IntradayConfig:
     vwap_atr_period:       int   = 14
 
     # ── VWAP dead zone (Step 3) ────────────────────────────────────────────────
-    vwap_dead_zone_start:  int   = 105
+    # EXPERIMENT: disabled (start==end==0 → empty range) so every time-of-day
+    # window is measurable. Re-introduce a targeted dead zone afterward if the
+    # midday segment proves unprofitable.
+    vwap_dead_zone_start:  int   = 0
     """Bar index where the midday dead zone begins (~11:15 AM on 1-min bars,
     counting from bar 0 = 9:30 AM open). No new VWAP reversion entries are
     opened between dead_zone_start and dead_zone_end. Liquidity is lowest
     midday; extensions drift rather than snap back. Shifted from 120 (11:30 AM)
     to 105 (11:15 AM) to block fill-bar leakage from signals at the boundary."""
 
-    vwap_dead_zone_end:    int   = 210
-    """Bar index where the dead zone ends (~2:00 PM, bar 270 on 1-min data
-    from 9:30 AM open). Entries resume here through vwap_entry_cutoff.
-    Previously mis-set to 180 (~12:30 PM), leaving a large unguarded drift
-    window from 12:30–2:00 PM."""
+    vwap_dead_zone_end:    int   = 0
+    """EXPERIMENT: 0 disables the dead zone (the `start <= i < end` test is never
+    true when start==end==0). Original value 210 blocked midday entries. Restore
+    a targeted window here if the segmented results show midday drift losses."""
 
     # ── VWAP SPY alignment (Step 3) ────────────────────────────────────────────
     vwap_spy_alignment:    bool  = True
