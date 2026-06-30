@@ -61,10 +61,11 @@ class LocalDataCache:
         start_pd = pd.to_datetime(start, utc=True)
         end_pd = pd.to_datetime(end, utc=True)
 
-        # Minute bars use date-keyed files to avoid stale cross-day cache hits.
+        # Minute bars use date+feed-keyed files so SIP and IEX data are stored
+        # separately and switching feeds never silently returns wrong-feed data.
         if timeframe.unit == TimeFrameUnit.Minute:
             date_str = start_pd.strftime("%Y%m%d")
-            file_path = self.cache_dir / tf_folder / f"{api_symbol}_{date_str}.parquet"
+            file_path = self.cache_dir / tf_folder / f"{api_symbol}_{date_str}_{feed}.parquet"
         else:
             # Cache filename uses the normalized symbol so the dash/dot forms share one file.
             file_path = self.cache_dir / tf_folder / f"{api_symbol}.parquet"

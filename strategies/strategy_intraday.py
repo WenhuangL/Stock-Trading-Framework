@@ -198,18 +198,26 @@ class IntradayConfig:
     daily_dd_halt_pct: float = 0.004      # halt new positions if day P&L < -0.4% of portfolio
 
     # ── Slippage / fill realism ────────────────────────────────────────────────
-    slippage_pct: float = 0.0005  # 0.05% per fill (entry AND exit)
+    slippage_pct: float = 0.001   # 0.10% per fill (entry AND exit) — matches IEX market-order friction
     use_next_bar_fill: bool = True  # fill at next bar's open, not signal bar's close
 
     # ── Transaction costs ──────────────────────────────────────────────────────
-    spread_pct: float = 0.0
-    """Half bid-ask spread applied to entry AND exit, on top of slippage. Large-cap
-    intraday names are tight, so this defaults to 0.0; raise it (e.g. 0.0002) to
-    stress-test against wider effective spreads."""
+    spread_pct: float = 0.0002
+    """Half bid-ask spread applied to entry AND exit, on top of slippage.
+    0.0002 (~$0.02 on a $100 stock) reflects the effective IEX spread on
+    liquid large-caps. Combined with slippage_pct this gives ~0.24% total
+    round-trip cost, matching realistic Alpaca IEX fills."""
 
     commission_per_trade: float = 0.0
     """Flat commission charged once per round-trip trade. Alpaca equities are
     commission-free, so 0.0 is realistic; set it to model a different broker."""
+
+    # ── Backtest data feed ─────────────────────────────────────────────────────
+    backtest_feed: str = "iex"
+    """Data feed used when fetching historical bars for the backtest.
+    'iex' matches live trading (free Alpaca tier) and naturally excludes
+    any ticker with no IEX coverage, just like live. Use 'sip' for the
+    broadest historical data (consolidated tape, paid tier)."""
 
     # ── Fix 7: ORB minimum breakout margin ────────────────────────────────────
     orb_breakout_margin_pct: float = 0.002
@@ -1060,7 +1068,8 @@ class IntradayStrategy:
         cache = LocalDataCache(self.dc)
         for sym in fetch_tickers:
             try:
-                df = cache.get_bars_df(sym, TimeFrame.Minute, start_dt, end_dt)
+                df = cache.get_bars_df(sym, TimeFrame.Minute, start_dt, end_dt,
+                                       feed=self.cfg.backtest_feed)
                 if df is not None and not df.empty:
                     df.index = pd.to_datetime(df.index).tz_convert(ET)
                     minute_store[sym] = df
