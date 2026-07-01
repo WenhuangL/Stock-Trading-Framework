@@ -135,9 +135,13 @@ class IntradayConfig:
     120 = 7:30–9:30 AM ET window. Extend to 240 to catch overnight headlines."""
 
     # ── Phase 2: VWAP Reversion ────────────────────────────────────────────────
-    vwap_entry_start:      str   = "11:00" # don't enter before this (morning volatility)
-    vwap_entry_cutoff:     str   = "14:30" # no new entries after 2 PM
-    vwap_phase_end:        str   = "15:00"
+    # EXPERIMENT (reversion-windows branch): widened to the full session to test
+    # whether the reversion edge extends into the 9:45-11:00 AM and 3:00-3:55 PM
+    # windows. Baseline (11:00-14:30 window) = +9.43%. Segment results by entry
+    # time to see which windows actually carry edge before locking these in.
+    vwap_entry_start:      str   = "09:45" # was 11:00 — test morning reversion
+    vwap_entry_cutoff:     str   = "15:45" # was 14:30 — test afternoon/close reversion
+    vwap_phase_end:        str   = "15:55"  # was 15:00 — hold into the close
     vwap_extension_atr:    float = 2.50   # price must be > N×ATR from VWAP
     vwap_sl_atr:           float = 1.40   # SL if extends further to this multiple
     vwap_tp_pct:           float = 0.002  # TP within 0.2% of VWAP
@@ -153,18 +157,20 @@ class IntradayConfig:
     vwap_atr_period:       int   = 14
 
     # ── VWAP dead zone (Step 3) ────────────────────────────────────────────────
-    vwap_dead_zone_start:  int   = 105
+    # EXPERIMENT: disabled (start==end==0 → empty range) so every time-of-day
+    # window is measurable. Re-introduce a targeted dead zone afterward if the
+    # midday segment proves unprofitable.
+    vwap_dead_zone_start:  int   = 0
     """Bar index where the midday dead zone begins (~11:15 AM on 1-min bars,
     counting from bar 0 = 9:30 AM open). No new VWAP reversion entries are
     opened between dead_zone_start and dead_zone_end. Liquidity is lowest
     midday; extensions drift rather than snap back. Shifted from 120 (11:30 AM)
     to 105 (11:15 AM) to block fill-bar leakage from signals at the boundary."""
 
-    vwap_dead_zone_end:    int   = 210
-    """Bar index where the dead zone ends (~2:00 PM, bar 270 on 1-min data
-    from 9:30 AM open). Entries resume here through vwap_entry_cutoff.
-    Previously mis-set to 180 (~12:30 PM), leaving a large unguarded drift
-    window from 12:30–2:00 PM."""
+    vwap_dead_zone_end:    int   = 0
+    """EXPERIMENT: 0 disables the dead zone (the `start <= i < end` test is never
+    true when start==end==0). Original value 210 blocked midday entries. Restore
+    a targeted window here if the segmented results show midday drift losses."""
 
     # ── VWAP SPY alignment (Step 3) ────────────────────────────────────────────
     vwap_spy_alignment:    bool  = True
@@ -432,36 +438,20 @@ class IntradayStrategy:
         account = self.tc.get_account()
         portfolio_value = float(account.portfolio_value)
 
-        # ── Phase 1: ORB ──────────────────────────────────────────────────────
-        _wait_until("09:30")   # safety net; run_session.py already waits here
-        self.log.info("Phase 1: Opening Range Breakout")
-        self._phase_orb(portfolio_value)
-
-        # ── Phase 2: VWAP Reversion ───────────────────────────────────────────
-        _wait_until(self.cfg.vwap_entry_start)
-        self.log.info("Phase 2: VWAP Reversion")
+        # ── VWAP Reversion owns the full session (09:45 – 15:55) ──────────────
+        # ORB and Power Hour removed from the live session. Both were confirmed
+        # money-losers in the 2023 backtest (large-caps mean-revert intraday, so
+        # continuation/breakout bets lose). ORB's blocking 9:30-10:30 loop also
+        # prevented VWAP from capturing the morning reversion window, which the
+        # backtest showed is the single most profitable window of the day
+        # (avg +$13.30/trade). _phase_vwap now runs the whole session: it enters
+        # 09:45-15:45, then holds and closes all positions through
+        # vwap_phase_end (15:55).
+        _wait_until(self.cfg.vwap_entry_start)   # 09:45 (also serves as the market-open wait)
+        self.log.info("Phase: VWAP Reversion (full session 09:45–15:55)")
         self._phase_vwap(portfolio_value)
 
-        # ── Gap (2:30 – 3:55 PM): monitor existing positions, no new entries ────
-        # Power Hour disabled for paper testing — remove the `if False` block and
-        # restore the original two lines below to re-enable:
-        #   _wait_until("15:05")
-        #   self.log.info("Phase 3: Power Hour")
-        #   self._phase_power(portfolio_value)
-        if False:
-            _wait_until("15:05")
-            self.log.info("Phase 3: Power Hour")
-            self._phase_power(portfolio_value)
-        else:
-            self.log.info("Power Hour disabled — monitoring existing positions until 3:55 PM.")
-            hard_close = _parse_time_today(self.cfg.power_hard_close)
-            while datetime.datetime.now(ET) < hard_close:
-                self._shared_monitor()
-                time.sleep(self.cfg.monitor_interval_sec)
-            for pos in [p for p in self._positions if not p.get("closed", False)]:
-                self._close_live_position(pos, reason="session_end")
-
-        # Final close — anything still open at 3:55 PM
+        # Final close — safety net for anything _phase_vwap left open.
         remaining = [p for p in self._positions if not p.get("closed", False)]
         if remaining:
             self.log.info(f"Closing {len(remaining)} remaining position(s) at session end.")
