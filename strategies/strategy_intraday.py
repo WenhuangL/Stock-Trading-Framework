@@ -438,36 +438,20 @@ class IntradayStrategy:
         account = self.tc.get_account()
         portfolio_value = float(account.portfolio_value)
 
-        # ── Phase 1: ORB ──────────────────────────────────────────────────────
-        _wait_until("09:30")   # safety net; run_session.py already waits here
-        self.log.info("Phase 1: Opening Range Breakout")
-        self._phase_orb(portfolio_value)
-
-        # ── Phase 2: VWAP Reversion ───────────────────────────────────────────
-        _wait_until(self.cfg.vwap_entry_start)
-        self.log.info("Phase 2: VWAP Reversion")
+        # ── VWAP Reversion owns the full session (09:45 – 15:55) ──────────────
+        # ORB and Power Hour removed from the live session. Both were confirmed
+        # money-losers in the 2023 backtest (large-caps mean-revert intraday, so
+        # continuation/breakout bets lose). ORB's blocking 9:30-10:30 loop also
+        # prevented VWAP from capturing the morning reversion window, which the
+        # backtest showed is the single most profitable window of the day
+        # (avg +$13.30/trade). _phase_vwap now runs the whole session: it enters
+        # 09:45-15:45, then holds and closes all positions through
+        # vwap_phase_end (15:55).
+        _wait_until(self.cfg.vwap_entry_start)   # 09:45 (also serves as the market-open wait)
+        self.log.info("Phase: VWAP Reversion (full session 09:45–15:55)")
         self._phase_vwap(portfolio_value)
 
-        # ── Gap (2:30 – 3:55 PM): monitor existing positions, no new entries ────
-        # Power Hour disabled for paper testing — remove the `if False` block and
-        # restore the original two lines below to re-enable:
-        #   _wait_until("15:05")
-        #   self.log.info("Phase 3: Power Hour")
-        #   self._phase_power(portfolio_value)
-        if False:
-            _wait_until("15:05")
-            self.log.info("Phase 3: Power Hour")
-            self._phase_power(portfolio_value)
-        else:
-            self.log.info("Power Hour disabled — monitoring existing positions until 3:55 PM.")
-            hard_close = _parse_time_today(self.cfg.power_hard_close)
-            while datetime.datetime.now(ET) < hard_close:
-                self._shared_monitor()
-                time.sleep(self.cfg.monitor_interval_sec)
-            for pos in [p for p in self._positions if not p.get("closed", False)]:
-                self._close_live_position(pos, reason="session_end")
-
-        # Final close — anything still open at 3:55 PM
+        # Final close — safety net for anything _phase_vwap left open.
         remaining = [p for p in self._positions if not p.get("closed", False)]
         if remaining:
             self.log.info(f"Closing {len(remaining)} remaining position(s) at session end.")
