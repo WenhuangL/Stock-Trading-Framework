@@ -143,7 +143,7 @@ class IntradayConfig:
     vwap_entry_cutoff:     str   = "15:45" # was 14:30 — test afternoon/close reversion
     vwap_phase_end:        str   = "15:55"  # was 15:00 — hold into the close
     vwap_extension_atr:    float = 2.50   # price must be > N×ATR from VWAP
-    vwap_sl_atr:           float = 1.40   # SL if extends further to this multiple
+    vwap_sl_atr:           float = 1.00   # SL distance in ATR (was 1.40 — segmented opt found a tighter stop wins: full-year 13.46%->14.32%, validated out-of-sample H1 6.85->7.25 / H2 6.16->6.57, PF 3.48->4.16)
     vwap_tp_pct:           float = 0.002  # TP within 0.2% of VWAP
     vwap_tp_extension_atr: float = 1.00  # extend TP this many ATR past VWAP (0 = exit at VWAP)
     vwap_breakeven_atr:    float = 1.00   # slide SL to entry after this many ATR of recovery
