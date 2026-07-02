@@ -48,13 +48,30 @@ logging.basicConfig(
 )
 log = logging.getLogger("UniverseBuilder")
 
+# S&P 500 members removed during 2022-2024, absent from the current Wikipedia list.
+# Including them eliminates survivorship bias for backtests over that period.
+# Tickers whose data ends before the backtest start (e.g. CTXS taken private Sep 2022)
+# return empty DataFrames from yfinance and are silently dropped downstream.
+_HISTORICALLY_REMOVED_SP500: frozenset = frozenset({
+    "SIVB",  # SVB Financial Group  — removed Mar 2023 (bank failure)
+    "FRC",   # First Republic Bank  — removed May 2023 (bank failure)
+    "ATVI",  # Activision Blizzard  — removed Oct 2023 (Microsoft acq.)
+    "TWTR",  # Twitter              — removed Nov 2022 (privatized; data through Oct 27 2022)
+    "CTXS",  # Citrix Systems       — removed Sep 2022 (taken private)
+    "CERN",  # Cerner Corp          — removed Jun 2022 (Oracle acq.)
+    "INFO",  # IHS Markit           — removed Feb 2022 (S&P Global merger)
+    "XLNX",  # Xilinx               — removed Feb 2022 (AMD acq.)
+    "PBCT",  # People's United      — removed Feb 2022 (M&T Bank acq.)
+})
+
 
 # =============================================================================
 # DATA FETCHING
 # =============================================================================
 
 def get_sp500_tickers() -> List[str]:
-    """Fetch the current S&P 500 constituent list from Wikipedia."""
+    """Fetch the current S&P 500 constituent list from Wikipedia, then union with
+    historically removed members to eliminate survivorship bias for 2022-2024 backtests."""
     log.info("Fetching S&P 500 ticker list from Wikipedia...")
     try:
         url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
@@ -74,10 +91,16 @@ def get_sp500_tickers() -> List[str]:
         # yfinance uses '-' instead of '.' for classes (e.g. BRK-B)
         tickers = tables[0]["Symbol"].str.replace(".", "-", regex=False).tolist()
         log.info(f"Successfully fetched {len(tickers)} S&P 500 tickers.")
-        return tickers
     except Exception as exc:
         log.error(f"Failed to fetch S&P 500 list: {exc}")
-        return []
+        tickers = []
+
+    combined = list(set(tickers) | _HISTORICALLY_REMOVED_SP500)
+    log.info(
+        "Added %d historically removed tickers to candidate pool (survivorship-bias fix).",
+        len(_HISTORICALLY_REMOVED_SP500),
+    )
+    return combined
 
 def get_sp400_tickers() -> List[str]:
     """Fetch S&P 400 mid-cap constituents from Wikipedia."""
@@ -250,6 +273,104 @@ def calculate_weekly_scores(df: pd.DataFrame, top_n: int, sma200_filter: bool = 
     return historical_map
 
 
+def calculate_weekly_scores_short(df: pd.DataFrame, top_n: int) -> dict:
+    """
+    Build a short-optimised PIT universe.
+
+    Pre-filter: confirmed death cross (SMA(50) < SMA(200)) AND price below SMA(200).
+    Score weights:
+      40% — most negative 20-day momentum
+      30% — steepest declining SMA(200) slope (20-day change)
+      20% — volatility Gaussian centred at 40% annualised
+      10% — liquidity (30-day average volume)
+
+    Requires pad_days >= 250 so SMA(200) has adequate warm-up history.
+    """
+    log.info("Calculating rolling indicators for short universe...")
+
+    df = df.sort_index(level=['symbol', 'date'])
+
+    close = df['close']
+
+    # 30-day average volume — liquidity floor
+    vol_30 = df.groupby('symbol')['volume'].rolling(30).mean()
+    vol_30.index = vol_30.index.droplevel(0)
+
+    # 20-day annualised historical volatility
+    log_ret = np.log(close / df.groupby('symbol')['close'].shift(1))
+    hv_20 = log_ret.groupby('symbol').rolling(20).std() * np.sqrt(252)
+    hv_20.index = hv_20.index.droplevel(0)
+
+    # 20-day momentum
+    mom_20 = (close / df.groupby('symbol')['close'].shift(20)) - 1
+
+    # SMA(200) and SMA(50) — for pre-filter and slope
+    sma200_raw = df.groupby('symbol')['close'].rolling(200).mean()
+    sma200_raw.index = sma200_raw.index.droplevel(0)
+
+    sma50_raw = df.groupby('symbol')['close'].rolling(50).mean()
+    sma50_raw.index = sma50_raw.index.droplevel(0)
+
+    # 20-trading-day slope of SMA(200): (current - 20 bars ago) / |20 bars ago|
+    sma200_lag20 = sma200_raw.groupby(level='symbol').shift(20)
+    sma200_slope = (sma200_raw - sma200_lag20) / sma200_lag20.abs()
+
+    # Death-cross flag and below-SMA(200) flag
+    death_cross  = pd.Series((sma50_raw.values < sma200_raw.values), index=vol_30.index)
+    below_sma200 = pd.Series((df['close'].values < sma200_raw.values), index=vol_30.index)
+
+    scores = pd.DataFrame({
+        'vol_30':        vol_30,
+        'hv_20':         hv_20,
+        'mom_20':        mom_20,
+        'sma200_slope':  sma200_slope,
+        'death_cross':   death_cross,
+        'below_sma200':  below_sma200,
+    }).dropna()
+
+    log.info("Sampling short scores on week-ending days and ranking...")
+
+    scores = scores.reset_index()
+    scores['iso_week'] = scores['date'].dt.strftime('%G-W%V')
+
+    weekly_final_scores = scores.groupby(['iso_week', 'symbol']).last().reset_index()
+
+    historical_map: dict = {}
+    weeks = weekly_final_scores['iso_week'].unique()
+    weeks.sort()
+
+    for week in weeks:
+        week_data = weekly_final_scores[weekly_final_scores['iso_week'] == week].copy()
+
+        # Pre-filter: death cross AND price below SMA(200)
+        week_data = week_data[
+            (week_data['death_cross'] == True) & (week_data['below_sma200'] == True)
+        ]
+        if week_data.empty:
+            historical_map[week] = []
+            continue
+
+        score_neg_mom   = _minmax(-week_data['mom_20'])
+        score_sma_slope = _minmax(-week_data['sma200_slope'])
+        score_hv        = np.exp(-0.5 * ((week_data['hv_20'] - 0.40) / 0.15) ** 2)
+        score_vol       = _minmax(week_data['vol_30'])
+
+        week_data = week_data.copy()
+        week_data['composite'] = (
+            0.40 * score_neg_mom +
+            0.30 * score_sma_slope +
+            0.20 * score_hv +
+            0.10 * score_vol
+        )
+
+        top_stocks = week_data.sort_values('composite', ascending=False).head(top_n)
+        historical_map[week] = top_stocks['symbol'].tolist()
+
+    non_empty = sum(1 for v in historical_map.values() if v)
+    log.info(f"Short universe: {len(historical_map)} weeks, {non_empty} non-empty.")
+    return historical_map
+
+
 # =============================================================================
 # MAIN EXECUTION
 # =============================================================================
@@ -269,6 +390,15 @@ def main():
             "Only include stocks trading above their 200-day SMA in each week's "
             "selection.  Intended for the RSI-2 strategy universe.  Use with "
             "--out output/historical_universes_rsi2.json."
+        ),
+    )
+    parser.add_argument(
+        "--short-universe", action="store_true",
+        help=(
+            "Build a short-optimised universe: pre-filtered by death cross "
+            "(SMA50 < SMA200) and scored on negative momentum + declining "
+            "SMA(200) slope.  Use with "
+            "--out output/historical_universes_rsi2_short.json."
         ),
     )
 
@@ -291,14 +421,18 @@ def main():
             return
 
     # 2. Fetch the data (pad extra history for SMA(200) warm-up when needed)
-    pad_days = 250 if args.sma200_filter else 60
+    # Short universe needs 250 days for SMA(200) + 20-day slope lag; same for sma200_filter.
+    pad_days = 250 if (args.sma200_filter or args.short_universe) else 60
     df = fetch_bulk_daily_data(tickers, args.start, args.end, pad_days=pad_days)
     if df.empty:
         log.error("No data fetched. Check date range or ticker symbols.")
         return
 
     # 3. Calculate scores and build the map
-    universe_map = calculate_weekly_scores(df, top_n=args.top_n, sma200_filter=args.sma200_filter)
+    if args.short_universe:
+        universe_map = calculate_weekly_scores_short(df, top_n=args.top_n)
+    else:
+        universe_map = calculate_weekly_scores(df, top_n=args.top_n, sma200_filter=args.sma200_filter)
 
     # 4. Save to JSON
     out_path = Path(args.out)

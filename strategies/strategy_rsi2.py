@@ -125,6 +125,16 @@ class Rsi2Config:
     When the broad market is in a bull regime, overbought bounces on individual
     stocks tend to extend rather than revert.  SPY is fetched automatically."""
 
+    spy_sma_slope_period: int = 60
+    """Additionally require SPY's SMA(200) to be declining over the last N days
+    before allowing short entries.  When SPY is below SMA(200) but the SMA(200)
+    has started flattening or rising (bear-market recovery), individual short
+    signals tend to fail — the broad bounce lifts even structurally weak stocks.
+    60 days is intentional: a 20-day window is too short and still fires into
+    bear-market bounces (the SMA(200) may still be falling over 20 days even
+    while the price has already rebounded from the bottom)."""
+
+
     sma_death_cross_period: int = 50
     """Require SMA(short) < SMA(trend) on the candidate stock before shorting.
     Default 50: SMA(50) < SMA(200) = confirmed death cross.  This filters out
@@ -161,6 +171,24 @@ class Rsi2Config:
     min_avg_volume: int = 500_000
     """20-day avg volume floor; ensures fills are realistic at market open."""
 
+    symbol_blacklist: frozenset = frozenset({
+        "TSLA",   # gap-prone, disrespects technical levels; 4 stop-losses in 2022-23
+        "INTC",   # structurally declining business; RSI fires repeatedly, reversion never comes
+        "GOOG",   # duplicate of GOOGL (same underlying, Alphabet class C)
+        "GOOGL",  # net loser + same stock as GOOG; double-sizing Alphabet exposure
+        "PCG",    # utility with wildfire/regulatory event risk; idiosyncratic, not RSI-reverting
+        "CMCSA",  # traditional media in structural decline; similar false-signal pattern to INTC
+        "BAC",    # rate-sensitive banking, low-vol; RSI extremes tend to persist not revert
+    })
+    """Tickers to unconditionally skip on both long and short sides.
+    These are stocks with structural reasons to avoid: gap risk, secular decline,
+    duplicate underlyings, or sector dynamics that cause RSI extremes to persist."""
+
+    min_daily_range_pct: float = 0.0
+    """Minimum 20-day average (high-low)/close.  0 = disabled.
+    Filters out low-volatility names that lack the intraday amplitude
+    needed for RSI-2 mean-reversion to produce meaningful P&L."""
+
     # ── Slippage / fill realism ────────────────────────────────────────────────
     slippage_pct: float = 0.001
     """0.10% per fill — conservative for liquid large caps at market open."""
@@ -169,6 +197,17 @@ class Rsi2Config:
     """Additional half-spread (0.05%) per fill."""
 
     commission_per_trade: float = 0.0
+
+    short_borrow_rate_annual: float = 0.005
+    """Annualised stock borrow cost for short positions (0.5% default — conservative GC rate
+    for S&P 500 names; death-cross candidates in downtrend may be 1-3%).
+    Deducted as: notional × rate × calendar_days / 365.  Set to 0.0 to disable."""
+
+    daily_bar_feed: str = "iex"
+    """Market data feed for daily OHLCV bars.
+    Defaults to 'iex' to match Alpaca's free-tier live feed and keep the backtest
+    internally consistent with the PIT universes (which are also scored on IEX data).
+    Change to 'sip' only if using a paid Alpaca subscription for live trading."""
 
     # ── Lookback ───────────────────────────────────────────────────────────────
     min_history_bars: int = 210
@@ -216,6 +255,9 @@ class Rsi2Strategy:
         df must be sliced through today's close (no lookahead).
         Returns signal dict or None.
         """
+        if sym in self.cfg.symbol_blacklist:
+            return None
+
         if len(df) < self.cfg.min_history_bars:
             return None
 
@@ -229,6 +271,11 @@ class Rsi2Strategy:
         avg_vol = float(volume.iloc[-21:-1].mean())
         if avg_vol < self.cfg.min_avg_volume:
             return None
+
+        if self.cfg.min_daily_range_pct > 0 and "high" in df.columns and "low" in df.columns:
+            avg_range = float(((df["high"] - df["low"]) / df["close"]).iloc[-21:-1].mean())
+            if avg_range < self.cfg.min_daily_range_pct:
+                return None
 
         sma200_ser = calculate_sma(df, period=self.cfg.sma_trend_period)
         sma200_val = float(sma200_ser.iloc[-1])
@@ -255,6 +302,9 @@ class Rsi2Strategy:
         df must be sliced through today's close (no lookahead).
         Returns signal dict or None.
         """
+        if sym in self.cfg.symbol_blacklist:
+            return None
+
         if len(df) < self.cfg.min_history_bars:
             return None
 
@@ -268,6 +318,11 @@ class Rsi2Strategy:
         avg_vol = float(volume.iloc[-21:-1].mean())
         if avg_vol < self.cfg.min_avg_volume:
             return None
+
+        if self.cfg.min_daily_range_pct > 0 and "high" in df.columns and "low" in df.columns:
+            avg_range = float(((df["high"] - df["low"]) / df["close"]).iloc[-21:-1].mean())
+            if avg_range < self.cfg.min_daily_range_pct:
+                return None
 
         # SMA(200) filter — INVERTED for shorts: must be in a downtrend
         sma200_ser = calculate_sma(df, period=self.cfg.sma_trend_period)
@@ -315,7 +370,7 @@ class Rsi2Strategy:
 
         for i, sym in enumerate(tickers):
             try:
-                df = cache.get_bars_df(sym, TimeFrame.Day, start_dt, end_dt, feed="iex")
+                df = cache.get_bars_df(sym, TimeFrame.Day, start_dt, end_dt, feed=self.cfg.daily_bar_feed)
                 if df is not None and not df.empty:
                     df.index = pd.DatetimeIndex(df.index).tz_convert(ET).normalize()
                     df = df[~df.index.duplicated(keep="last")].sort_index()
@@ -377,6 +432,7 @@ class Rsi2Strategy:
         end_date: str,
         initial_cash: float = 100_000.0,
         historical_universes: Optional[dict] = None,
+        historical_universes_short: Optional[dict] = None,
     ) -> dict:
         """
         Simulate the RSI-2 strategy on historical daily bars.
@@ -419,13 +475,31 @@ class Rsi2Strategy:
             day_str = day.strftime("%Y-%m-%d")
 
             # ── PIT universe ──────────────────────────────────────────────────
-            reference_day  = day - pd.Timedelta(days=7)
-            year, week, _  = reference_day.isocalendar()
-            week_str       = f"{year}-W{week:02d}"
-            active         = set(
-                historical_universes.get(week_str, tickers)
-                if historical_universes else tickers
-            )
+            reference_day = day - pd.Timedelta(days=7)
+            year, week, _ = reference_day.isocalendar()
+            week_str      = f"{year}-W{week:02d}"
+            # Long candidates: from the main (bidir) universe
+            if historical_universes:
+                _pit_long = historical_universes.get(week_str)
+                if _pit_long is None:
+                    self.log.debug("PIT long universe missing for week %s — skipping.", week_str)
+                    active_long = set()
+                else:
+                    active_long = set(_pit_long)
+            else:
+                active_long = set(tickers)
+
+            # Short candidates: from the dedicated short universe, falling back to
+            # the long universe when no separate short universe is loaded.
+            if historical_universes_short:
+                _pit_short = historical_universes_short.get(week_str)
+                if _pit_short is None:
+                    self.log.debug("PIT short universe missing for week %s — skipping.", week_str)
+                    active_short = set()
+                else:
+                    active_short = set(_pit_short)
+            else:
+                active_short = active_long
 
             # ── Step 1: Enter pending entries at today's open ─────────────────
             for sym, sig in list(pending_entries.items()):
@@ -511,9 +585,16 @@ class Rsi2Strategy:
                 # Short: cash += qty * (2*ep - exit_price)  [= qty*ep + profit]
                 # Unified: cash += qty*ep + dm*(exit_price - ep)*qty
                 def _exit(exit_price: float, reason: str) -> None:
-                    pnl = dm * (exit_price - ep) * pos["qty"] - self.cfg.commission_per_trade
+                    borrow_cost = 0.0
+                    if pos["direction"] == "short" and self.cfg.short_borrow_rate_annual > 0:
+                        notional      = pos["qty"] * ep
+                        entry_dt      = datetime.datetime.strptime(pos["entry_date"], "%Y-%m-%d")
+                        exit_dt       = datetime.datetime.strptime(day_str, "%Y-%m-%d")
+                        calendar_days = max((exit_dt - entry_dt).days, 1)
+                        borrow_cost   = notional * self.cfg.short_borrow_rate_annual * (calendar_days / 365)
+                    pnl = dm * (exit_price - ep) * pos["qty"] - self.cfg.commission_per_trade - borrow_cost
                     nonlocal cash
-                    cash += pos["qty"] * ep + dm * (exit_price - ep) * pos["qty"]
+                    cash += pos["qty"] * ep + dm * (exit_price - ep) * pos["qty"] - borrow_cost
                     pos.update(
                         closed=True,
                         exit_price=round(exit_price, 4),
@@ -536,9 +617,11 @@ class Rsi2Strategy:
 
                 # ── 2C: Intraday hard stop ────────────────────────────────────
                 # Long: bar_low touches stop.  Short: bar_high touches stop.
+                # Fill at the actual adverse extreme (bar_low/bar_high), not at sl_price.
+                # Gap stops (2B) already fill at bar_open; this handles intraday breach.
                 adverse = bar_low if dm == 1 else bar_high
                 if dm * adverse <= dm * sl:
-                    _exit(sl * (1 - dm * slip), "stop_loss")
+                    _exit(adverse * (1 - dm * slip), "stop_loss")
                     continue
 
                 # ── 2D/2E: EOD RSI/SMA signals (queue for next open) ─────────
@@ -591,8 +674,18 @@ class Rsi2Strategy:
                     spy_sma200  = calculate_sma(spy_hist, period=self.cfg.sma_trend_period)
                     spy_close   = float(spy_hist["close"].iloc[-1])
                     spy_sma_val = float(spy_sma200.iloc[-1])
-                    if not np.isnan(spy_sma_val) and spy_close > spy_sma_val:
-                        shorts_allowed = False  # bull regime — no new short entries
+                    if not np.isnan(spy_sma_val):
+                        if spy_close > spy_sma_val:
+                            shorts_allowed = False  # bull regime — price above SMA(200)
+                        else:
+                            # SPY is below SMA(200); also require SMA(200) to be declining.
+                            # If SMA(200) is flat or rising the market is in a bear-recovery
+                            # bounce — individual shorts tend to fail in that environment.
+                            valid_sma = spy_sma200.dropna()
+                            if len(valid_sma) > self.cfg.spy_sma_slope_period:
+                                spy_sma_lag = float(valid_sma.iloc[-(self.cfg.spy_sma_slope_period + 1)])
+                                if not np.isnan(spy_sma_lag) and spy_sma_val >= spy_sma_lag:
+                                    shorts_allowed = False  # SMA(200) flat/rising — bear recovery
                 except (KeyError, IndexError):
                     pass
 
@@ -600,7 +693,7 @@ class Rsi2Strategy:
                 long_signals:  list[dict] = []
                 short_signals: list[dict] = []
 
-                for sym in active:
+                for sym in active_long:
                     if sym in open_symbols or sym not in daily_data:
                         continue
                     try:
@@ -613,9 +706,18 @@ class Rsi2Strategy:
                     sig = self._check_signal(sym, hist)
                     if sig is not None:
                         long_signals.append(sig)
-                    elif shorts_allowed:
-                        # A stock can't be both RSI<10 and RSI>90 simultaneously,
-                        # so elif avoids the redundant second RSI computation.
+
+                if shorts_allowed:
+                    for sym in active_short:
+                        if sym in open_symbols or sym not in daily_data:
+                            continue
+                        try:
+                            hist = daily_data[sym].loc[:day_str]
+                        except KeyError:
+                            continue
+                        if len(hist) < self.cfg.min_history_bars:
+                            continue
+
                         short_sig = self._check_short_signal(sym, hist)
                         if short_sig is not None:
                             short_signals.append(short_sig)
