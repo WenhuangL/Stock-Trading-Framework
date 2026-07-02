@@ -188,7 +188,7 @@ def _spy_benchmark_pct(dc, start_date: str, end_date: str):
 def _run_period(
     label, start_date, end_date, *,
     tc, dc, rm, ucfg, tickers,
-    hu_intraday, hu_eod, hu_rsi2=None, cash, show_charts,
+    hu_intraday, hu_eod, hu_rsi2=None, hu_rsi2_short=None, cash, show_charts,
     strategies: set = frozenset({"intraday", "eod", "swing", "rsi2"}),
 ):
     """Run requested strategy backtests for one date range and print results."""
@@ -281,6 +281,7 @@ def _run_period(
             rsi2_results = rsi2.backtest(
                 tickers=tickers, start_date=start_date, end_date=end_date,
                 initial_cash=cash, historical_universes=hu_rsi2,
+                historical_universes_short=hu_rsi2_short,
             )
             rsi2.print_summary(rsi2_results)
         except Exception as exc:
@@ -309,6 +310,7 @@ def _run_period(
             start_date=start_date,
             end_date=end_date,
             spy_return_pct=spy_pct,
+            rsi2_results=rsi2_results,
         )
         log.info(f"Trades saved to output/trades.db  (run_id={run_id})")
     except Exception as exc:
@@ -459,6 +461,13 @@ def main() -> None:
             "--start <date> --end <date>"
         )
 
+    historical_universes_rsi2_short = None
+    rsi2_short_path = os.path.join("output", "historical_universes_rsi2_short.json")
+    if os.path.exists(rsi2_short_path):
+        with open(rsi2_short_path) as f:
+            historical_universes_rsi2_short = json.load(f)
+        log.info(f"Loaded RSI-2 short universe from {rsi2_short_path}")
+
     # TEMPORARY VALIDATION — remove after confirming
     '''if historical_universes_intraday:
         weeks = sorted(historical_universes_intraday.keys())
@@ -481,7 +490,10 @@ def main() -> None:
     # ── Expand data download list to cover all historical tickers ─────────────
     if not args.tickers:
         unique_tickers = set()
-        for universe in [historical_universes_intraday, historical_universes_eod, historical_universes_rsi2]:
+        for universe in [
+            historical_universes_intraday, historical_universes_eod,
+            historical_universes_rsi2, historical_universes_rsi2_short,
+        ]:
             if universe:
                 for week_list in universe.values():
                     unique_tickers.update(week_list)
@@ -515,6 +527,7 @@ def main() -> None:
             hu_intraday=historical_universes_intraday,
             hu_eod=historical_universes_eod,
             hu_rsi2=historical_universes_rsi2,
+            hu_rsi2_short=historical_universes_rsi2_short,
             cash=cash, show_charts=show_charts,
             strategies=selected_strategies,
         )
