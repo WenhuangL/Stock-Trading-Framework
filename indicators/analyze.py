@@ -246,6 +246,31 @@ def calculate_sma(data: pd.DataFrame, period: int = 50) -> pd.Series:
     return data["close"].rolling(window=period).mean()
 
 
+def calculate_dollar_volume(data: pd.DataFrame, period: int = 20) -> pd.Series:
+    """
+    Rolling average dollar volume (close x volume).
+
+    The single most important liquidity metric for thin / micro-cap names:
+    share-volume alone is misleading because a $2 stock trading 500k shares
+    ($1M/day) is far more liquid than a $200 stock trading the same share count
+    would suggest.  Micro-cap strategies gate on a *dollar*-volume floor, not a
+    share-volume floor.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Must contain 'close' and 'volume' columns.
+    period : int
+        Rolling window in trading days (default 20).
+
+    Returns
+    -------
+    pd.Series
+        Rolling mean of (close * volume), in dollars.
+    """
+    return (data["close"] * data["volume"]).rolling(window=period).mean()
+
+
 def calculate_ema(data: pd.DataFrame, period: int = 20) -> pd.Series:
     """
     Exponential Moving Average (EMA).

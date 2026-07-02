@@ -82,7 +82,7 @@ DEFAULT_CASH       = 100_000.0
 # COMBINED SUMMARY PRINTER
 # =============================================================================
 
-_ALL_STRATEGIES = frozenset({"intraday", "eod", "swing", "rsi2"})
+_ALL_STRATEGIES = frozenset({"intraday", "eod", "swing", "rsi2", "microcap"})
 
 
 def _print_combined_summary(
@@ -91,12 +91,14 @@ def _print_combined_summary(
     initial_cash:     float,
     swing_results:    dict = None,
     rsi2_results:     dict = None,
+    microcap_results: dict = None,
     strategies:       frozenset = _ALL_STRATEGIES,
 ) -> None:
-    id_summary    = intraday_results.get("summary", {}) if "intraday" in strategies else {}
-    eod_summary   = eod_results.get("summary", {})      if "eod"      in strategies else {}
-    swing_summary = (swing_results or {}).get("summary", {}) if "swing" in strategies else {}
-    rsi2_summary  = (rsi2_results  or {}).get("summary", {}) if "rsi2"  in strategies else {}
+    id_summary       = intraday_results.get("summary", {}) if "intraday" in strategies else {}
+    eod_summary      = eod_results.get("summary", {})      if "eod"      in strategies else {}
+    swing_summary    = (swing_results or {}).get("summary", {}) if "swing" in strategies else {}
+    rsi2_summary     = (rsi2_results  or {}).get("summary", {}) if "rsi2"  in strategies else {}
+    microcap_summary = (microcap_results or {}).get("summary", {}) if "microcap" in strategies else {}
 
     id_trades = id_summary.get("num_trades", 0)
     id_pnl    = id_summary.get("final_value", initial_cash) - id_summary.get("initial_cash", initial_cash)
@@ -112,8 +114,12 @@ def _print_combined_summary(
     rsi2_pnl    = rsi2_summary.get("final_value", initial_cash) - initial_cash \
                   if rsi2_summary else 0.0
 
-    combined     = id_pnl + eod_pnl + sw_pnl + rsi2_pnl
-    total_trades = id_trades + eod_trades + sw_trades + rsi2_trades
+    mc_trades = microcap_summary.get("num_trades", 0)
+    mc_pnl    = microcap_summary.get("final_value", initial_cash) - initial_cash \
+                if microcap_summary else 0.0
+
+    combined     = id_pnl + eod_pnl + sw_pnl + rsi2_pnl + mc_pnl
+    total_trades = id_trades + eod_trades + sw_trades + rsi2_trades + mc_trades
     combined_pct = (combined / initial_cash) * 100 if initial_cash else 0
 
     title = "BACKTEST SUMMARY" if len(strategies) == 1 else "COMBINED BACKTEST SUMMARY"
@@ -134,6 +140,9 @@ def _print_combined_summary(
     if "rsi2" in strategies and rsi2_summary:
         print(f"  {'RSI-2 Mean Reversion':<25}  {rsi2_trades:>7}  "
               f"${rsi2_pnl:>+11,.2f}  {rsi2_pnl/initial_cash*100:>+7.2f}%")
+    if "microcap" in strategies and microcap_summary:
+        print(f"  {'Micro-Cap Reversion':<25}  {mc_trades:>7}  "
+              f"${mc_pnl:>+11,.2f}  {mc_pnl/initial_cash*100:>+7.2f}%")
     if len(strategies) > 1:
         print(f"  {'-'*25}  {'-'*7}  {'-'*12}  {'-'*8}")
         print(f"  {'COMBINED':<25}  {total_trades:>7}  "
@@ -151,6 +160,8 @@ def _print_combined_summary(
         detail_rows.append(("SWING DETAIL", swing_summary))
     if rsi2_summary:
         detail_rows.append(("RSI-2 DETAIL", rsi2_summary))
+    if microcap_summary:
+        detail_rows.append(("MICRO-CAP DETAIL", microcap_summary))
 
     for label, summary in detail_rows:
         if not summary:
@@ -200,7 +211,8 @@ def _spy_benchmark_pct(dc, start_date: str, end_date: str):
 def _run_period(
     label, start_date, end_date, *,
     tc, dc, rm, ucfg, tickers,
-    hu_intraday, hu_eod, hu_rsi2=None, hu_rsi2_short=None, cash, show_charts,
+    hu_intraday, hu_eod, hu_rsi2=None, hu_rsi2_short=None, hu_microcap=None,
+    cash, show_charts,
     strategies: frozenset = _ALL_STRATEGIES,
 ):
     """Run selected strategy backtests for one date range and print results."""
@@ -217,7 +229,8 @@ def _run_period(
     eod_results:      dict = {}
     swing_results:    dict = {}
     rsi2_results:     dict = {}
-    intraday = eod = swing = rsi2 = None
+    microcap_results: dict = {}
+    intraday = eod = swing = rsi2 = microcap = None
 
     # ── Intraday ──────────────────────────────────────────────────────────────
     if "intraday" in strategies:
@@ -297,10 +310,32 @@ def _run_period(
         except Exception as exc:
             log.exception(f"RSI-2 backtest failed: {exc}")
 
+    # ── Micro-cap mean reversion ──────────────────────────────────────────────
+    if "microcap" in strategies:
+        from strategies.strategy_microcap_reversion import (
+            MicrocapReversionStrategy, MicrocapReversionConfig,
+        )
+        log.info("-" * 60)
+        log.info("  Running MicrocapReversionStrategy.backtest()...")
+        log.info("-" * 60)
+        microcap = MicrocapReversionStrategy(
+            trading_client=tc, data_client=dc, config=MicrocapReversionConfig(),
+            risk_manager=rm, universe_config=ucfg,
+        )
+        try:
+            microcap_results = microcap.backtest(
+                tickers=tickers, start_date=start_date, end_date=end_date,
+                initial_cash=cash, historical_universes=hu_microcap,
+            )
+            microcap.print_summary(microcap_results)
+        except Exception as exc:
+            log.exception(f"Micro-cap backtest failed: {exc}")
+
     # ── Combined + benchmark ──────────────────────────────────────────────────
     _print_combined_summary(
         intraday_results, eod_results, cash, swing_results,
-        rsi2_results=rsi2_results, strategies=strategies,
+        rsi2_results=rsi2_results, microcap_results=microcap_results,
+        strategies=strategies,
     )
 
     spy_pct = _spy_benchmark_pct(dc, start_date, end_date)
@@ -314,6 +349,8 @@ def _run_period(
             parts.append(f"Swing {swing_results.get('summary', {}).get('total_return_pct', 0.0):+.2f}%")
         if "rsi2" in strategies:
             parts.append(f"RSI-2 {rsi2_results.get('summary', {}).get('total_return_pct', 0.0):+.2f}%")
+        if "microcap" in strategies:
+            parts.append(f"Micro-cap {microcap_results.get('summary', {}).get('total_return_pct', 0.0):+.2f}%")
         print(f"  BENCHMARK — SPY buy & hold ({label}): {spy_pct:+.2f}%")
         print(f"    vs {' | vs '.join(parts)}")
         print("=" * 70 + "\n")
@@ -328,6 +365,7 @@ def _run_period(
             end_date=end_date,
             spy_return_pct=spy_pct,
             rsi2_results=rsi2_results,
+            microcap_results=microcap_results,
         )
         log.info(f"Trades saved to output/trades.db  (run_id={run_id})")
     except Exception as exc:
@@ -355,8 +393,13 @@ def _run_period(
                 rsi2.plot_backtest(rsi2_results)
             except Exception as exc:
                 log.warning(f"RSI-2 plot failed: {exc}")
+        if microcap and microcap_results:
+            try:
+                microcap.plot_backtest(microcap_results)
+            except Exception as exc:
+                log.warning(f"Micro-cap plot failed: {exc}")
 
-    return intraday_results, eod_results, rsi2_results
+    return intraday_results, eod_results, rsi2_results, microcap_results
 
 
 # =============================================================================
@@ -379,10 +422,11 @@ def main() -> None:
                              "out-of-sample separately (guards against overfitting).")
     parser.add_argument(
         "--strategies", nargs="+",
-        choices=["intraday", "eod", "swing", "rsi2"],
-        default=["intraday", "eod", "swing", "rsi2"],
-        help="Which strategies to backtest (default: all four). "
-             "Use --strategies rsi2 to run only RSI-2 (fast, no minute-bar download).",
+        choices=["intraday", "eod", "swing", "rsi2", "microcap"],
+        default=["intraday", "eod", "swing", "rsi2", "microcap"],
+        help="Which strategies to backtest (default: all). "
+             "Use --strategies rsi2 to run only RSI-2 (fast, no minute-bar download); "
+             "--strategies microcap for the micro-cap mean-reversion strategy.",
     )
     parser.add_argument(
         "--intraday-universe", default=None,
@@ -492,6 +536,19 @@ def main() -> None:
             historical_universes_rsi2_short = json.load(f)
         log.info(f"Loaded RSI-2 short universe from {rsi2_short_path}")
 
+    historical_universes_microcap = None
+    microcap_universe_path = os.path.join("output", "historical_universes_microcap.json")
+    if os.path.exists(microcap_universe_path):
+        with open(microcap_universe_path) as f:
+            historical_universes_microcap = json.load(f)
+        log.info(f"Loaded micro-cap PIT universes from {microcap_universe_path}")
+    elif "microcap" in strategies:
+        log.warning(
+            "Could not find micro-cap PIT universe. Micro-cap backtest will use the "
+            "static ticker list. Build it with: python data_collection/"
+            "build_microcap_universe.py --start <date> --end <date>"
+        )
+
     # TEMPORARY VALIDATION — remove after confirming
     '''if historical_universes_intraday:
         weeks = sorted(historical_universes_intraday.keys())
@@ -517,6 +574,7 @@ def main() -> None:
         for universe in [
             historical_universes_intraday, historical_universes_eod,
             historical_universes_rsi2, historical_universes_rsi2_short,
+            historical_universes_microcap,
         ]:
             if universe:
                 for week_list in universe.values():
@@ -550,6 +608,7 @@ def main() -> None:
             hu_eod=historical_universes_eod,
             hu_rsi2=historical_universes_rsi2,
             hu_rsi2_short=historical_universes_rsi2_short,
+            hu_microcap=historical_universes_microcap,
             cash=cash, show_charts=show_charts,
             strategies=strategies,
         )
