@@ -340,6 +340,11 @@ def main() -> None:
         help="Which strategies to backtest (default: all). "
              "Examples: --strategies intraday  --strategies eod swing",
     )
+    parser.add_argument(
+        "--intraday-universe", default=None,
+        help="Override path to the intraday PIT universe JSON (default: "
+             "output/historical_universes.json). Used to A/B alternate universes.",
+    )
     args = parser.parse_args()
 
     strategies = frozenset(args.strategies)
@@ -401,7 +406,7 @@ def main() -> None:
     historical_universes_intraday = None
     historical_universes_eod = None
 
-    intraday_universe_path = os.path.join("output", "historical_universes.json")
+    intraday_universe_path = args.intraday_universe or os.path.join("output", "historical_universes.json")
     if os.path.exists(intraday_universe_path):
         with open(intraday_universe_path, "r") as f:
             historical_universes_intraday = json.load(f)
