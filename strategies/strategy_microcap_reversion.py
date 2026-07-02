@@ -164,9 +164,23 @@ class MicrocapReversionConfig:
     max_price: float = 15.0
     """Micro-cap price ceiling."""
 
-    min_dollar_volume: float = 250_000.0
+    min_dollar_volume: float = 25_000.0
     """20-day average dollar volume floor (close x volume).  Below this the wide
-    spread and non-fills eat the entire edge."""
+    spread and non-fills eat the entire edge.
+
+    IMPORTANT — this is measured on the IEX feed (daily_bar_feed), which reports
+    only IEX-exchange volume (~2-3% of the consolidated tape).  So these thresholds
+    are on the IEX SLICE, not consolidated volume: empirically a genuine micro-cap
+    runs ~15k-350k IEX $/day while a mid/large-cap sits at ~1.5M-3M IEX $/day.  The
+    floor/ceiling are calibrated to that IEX scale (paid SIP/consolidated data would
+    let you use true dollar volume — see build_microcap_universe.py)."""
+
+    max_dollar_volume: float = 1_000_000.0
+    """20-day average dollar volume CEILING (IEX slice — see min_dollar_volume).
+    The edge is specific to THIN names; liquid large-caps that merely trade in the
+    price band have arbitrage capital and do not overshoot.  ~1M IEX $/day sits in
+    the empirical gap between micro-caps (<=350k) and mid/large-caps (>=1.5M), so it
+    keeps the strategy on the micro-cap cohort even on a static ticker list."""
 
     dollar_vol_period: int = 20
 
@@ -315,6 +329,8 @@ class MicrocapReversionStrategy:
         avg_dollar_vol = float(dvol.iloc[-1])
         if np.isnan(avg_dollar_vol) or avg_dollar_vol < self.cfg.min_dollar_volume:
             return None
+        if avg_dollar_vol > self.cfg.max_dollar_volume:
+            return None  # too liquid — a large-cap in the price band, not a micro-cap
 
         # No-news proxy: reject drops too violent to be liquidity-driven.
         daily_ret = df["close"].pct_change().iloc[-self.cfg.lookback_days:]
