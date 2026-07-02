@@ -145,10 +145,14 @@ def _minmax(series: pd.Series) -> pd.Series:
     return (series - mn) / (mx - mn)
 
 
-def calculate_weekly_scores(df: pd.DataFrame, top_n: int) -> dict:
+def calculate_weekly_scores(df: pd.DataFrame, top_n: int, target_hv: float = 0.40) -> dict:
     """
     Calculate the universe scores vector-style across all dates and tickers,
     sample the scores every Friday, and extract the top N tickers per week.
+
+    target_hv: center of the volatility Gaussian (annualized HV). 0.40 is the
+    default reversion universe. Raise it (e.g. 0.55) to bias toward more volatile
+    names that extend further from VWAP — tested as a lever for VWAP reversion.
     """
     log.info("Calculating rolling indicators (Volume, Volatility, Momentum)...")
 
@@ -208,9 +212,8 @@ def calculate_weekly_scores(df: pd.DataFrame, top_n: int) -> dict:
         score_mom = _minmax(week_data['mom_20'])
         score_rvol = _minmax(week_data['rvol'])
 
-        # Apply Gaussian curve to Volatility (Targeting 40% annualized)
-        # Stocks near 40% get 1.0, stocks at 10% or 80% get near 0
-        target_hv = 0.40
+        # Apply Gaussian curve to Volatility (center = target_hv, default 40%)
+        # Stocks near target_hv get 1.0, stocks far from it get near 0
         decay = 0.15
         score_hv = np.exp(-0.5 * ((week_data['hv_20'] - target_hv) / decay) ** 2)
 
@@ -243,6 +246,10 @@ def main():
     parser.add_argument("--top-n", type=int, default=100, help="Number of stocks to select per week (default 100)")
     parser.add_argument("--out", type=str, default="output/historical_universes.json", help="Output JSON path")
     parser.add_argument("--universe", choices=["sp500", "sp400", "combined"],default="sp500")
+    parser.add_argument("--target-hv", type=float, default=0.40,
+                        help="Center of the volatility Gaussian, annualized HV "
+                             "(default 0.40). Raise (e.g. 0.55) for a higher-volatility "
+                             "reversion universe.")
 
     args = parser.parse_args()
     # 1. Determine the ticker list
@@ -269,7 +276,8 @@ def main():
         return
 
     # 3. Calculate scores and build the map
-    universe_map = calculate_weekly_scores(df, top_n=args.top_n)
+    log.info(f"Volatility target (Gaussian center): {args.target_hv:.2f} annualized HV")
+    universe_map = calculate_weekly_scores(df, top_n=args.top_n, target_hv=args.target_hv)
 
     # 4. Save to JSON
     out_path = Path(args.out)
