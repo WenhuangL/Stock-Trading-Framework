@@ -947,6 +947,79 @@ class UniverseSelector:
 
 
 # =============================================================================
+# RSI-2 UNIVERSE (S&P 500 only, SMA(200) trend filter)
+# =============================================================================
+
+@dataclass
+class Rsi2UniverseConfig(UniverseConfig):
+    """
+    Universe configuration for the RSI-2 Mean Reversion strategy.
+
+    Key differences from the default UniverseConfig:
+    - S&P 500 only (no Nasdaq-100): RSI-2 is a large-cap mean-reversion
+      strategy; adding small/mid caps and high-beta NDX names would increase
+      drawdowns and dilute the edge.
+    - Lower target HV (0.25 vs 0.40): RSI-2 works best on stocks that have
+      predictable short-term reversion patterns, not momentum blow-offs.
+    - Higher volume weight (0.40): liquidity is critical; RSI-2 positions are
+      typically held for 1–5 days and we need tight fills at the open.
+    - Separate cache so the live universe doesn't clobber the intraday/EOD one.
+    """
+    target_annualized_hv: float = 0.25
+    weight_volume:        float = 0.40
+    weight_volatility:    float = 0.30
+    weight_momentum:      float = 0.20
+    weight_rel_volume:    float = 0.10
+    top_n:                int   = 100
+    cache_path:           str   = "output/rsi2_universe_cache.json"
+    cache_ttl_days:       int   = 3
+    volume_lookback_days: int   = 210
+
+
+class Rsi2UniverseSelector(UniverseSelector):
+    """
+    Universe selector for RSI-2: S&P 500 stocks in established uptrends.
+
+    Overrides build_universe() to:
+    1. Source candidates from S&P 500 only (via get_sp500_tickers()).
+    2. Apply an SMA(200) trend filter after scoring so every stock in the
+       resulting universe is currently in a long-term uptrend.
+    """
+
+    def build_universe(self, return_scores: bool = False):
+        candidates = get_sp500_tickers()
+        bars_data  = self._fetch_bars(candidates)
+        if not bars_data:
+            self.log.error("No bar data returned — cannot build RSI-2 universe.")
+            return [] if not return_scores else pd.DataFrame()
+
+        scored_df = self._score_tickers(bars_data)
+        scored_df = self._apply_sma200_filter(scored_df, bars_data)
+        top       = scored_df.head(self.cfg.top_n)
+        self.log.info(
+            "RSI-2 universe built: %d S&P 500 candidates → %d above SMA(200) → top %d selected.",
+            len(candidates), len(scored_df), len(top),
+        )
+        return top if return_scores else top["symbol"].tolist()
+
+    def _apply_sma200_filter(
+        self, scored_df: pd.DataFrame, bars_data: dict
+    ) -> pd.DataFrame:
+        """Remove stocks whose latest close is at or below their 200-day SMA."""
+        qualified = []
+        for _, row in scored_df.iterrows():
+            sym = row["symbol"]
+            df  = bars_data.get(sym)
+            if df is None or len(df) < 200:
+                continue
+            sma200 = float(df["close"].rolling(200).mean().iloc[-1])
+            if np.isnan(sma200) or float(df["close"].iloc[-1]) <= sma200:
+                continue
+            qualified.append(row)
+        return pd.DataFrame(qualified).reset_index(drop=True) if qualified else pd.DataFrame()
+
+
+# =============================================================================
 # INTERNAL HELPERS
 # =============================================================================
 

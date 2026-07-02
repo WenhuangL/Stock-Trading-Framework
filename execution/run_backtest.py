@@ -82,7 +82,7 @@ DEFAULT_CASH       = 100_000.0
 # COMBINED SUMMARY PRINTER
 # =============================================================================
 
-_ALL_STRATEGIES = frozenset({"intraday", "eod", "swing"})
+_ALL_STRATEGIES = frozenset({"intraday", "eod", "swing", "rsi2"})
 
 
 def _print_combined_summary(
@@ -90,11 +90,13 @@ def _print_combined_summary(
     eod_results:      dict,
     initial_cash:     float,
     swing_results:    dict = None,
+    rsi2_results:     dict = None,
     strategies:       frozenset = _ALL_STRATEGIES,
 ) -> None:
     id_summary    = intraday_results.get("summary", {}) if "intraday" in strategies else {}
     eod_summary   = eod_results.get("summary", {})      if "eod"      in strategies else {}
     swing_summary = (swing_results or {}).get("summary", {}) if "swing" in strategies else {}
+    rsi2_summary  = (rsi2_results  or {}).get("summary", {}) if "rsi2"  in strategies else {}
 
     id_trades = id_summary.get("num_trades", 0)
     id_pnl    = id_summary.get("final_value", initial_cash) - id_summary.get("initial_cash", initial_cash)
@@ -106,9 +108,13 @@ def _print_combined_summary(
     sw_trades = swing_summary.get("num_trades", 0)
     sw_pnl    = swing_summary.get("final_value", initial_cash) - initial_cash if swing_summary else 0.0
 
-    combined     = id_pnl + eod_pnl + sw_pnl
+    rsi2_trades = rsi2_summary.get("num_trades", 0)
+    rsi2_pnl    = rsi2_summary.get("final_value", initial_cash) - initial_cash \
+                  if rsi2_summary else 0.0
+
+    combined     = id_pnl + eod_pnl + sw_pnl + rsi2_pnl
+    total_trades = id_trades + eod_trades + sw_trades + rsi2_trades
     combined_pct = (combined / initial_cash) * 100 if initial_cash else 0
-    total_trades = id_trades + eod_trades + sw_trades
 
     title = "BACKTEST SUMMARY" if len(strategies) == 1 else "COMBINED BACKTEST SUMMARY"
     print("\n" + "=" * 70)
@@ -125,6 +131,9 @@ def _print_combined_summary(
     if "swing" in strategies:
         print(f"  {'Swing Breakout':<25}  {sw_trades:>7}  "
               f"${sw_pnl:>+11,.2f}  {sw_pnl/initial_cash*100:>+7.2f}%")
+    if "rsi2" in strategies and rsi2_summary:
+        print(f"  {'RSI-2 Mean Reversion':<25}  {rsi2_trades:>7}  "
+              f"${rsi2_pnl:>+11,.2f}  {rsi2_pnl/initial_cash*100:>+7.2f}%")
     if len(strategies) > 1:
         print(f"  {'-'*25}  {'-'*7}  {'-'*12}  {'-'*8}")
         print(f"  {'COMBINED':<25}  {total_trades:>7}  "
@@ -140,6 +149,8 @@ def _print_combined_summary(
         detail_rows.append(("EOD DETAIL", eod_summary))
     if "swing" in strategies and swing_summary:
         detail_rows.append(("SWING DETAIL", swing_summary))
+    if rsi2_summary:
+        detail_rows.append(("RSI-2 DETAIL", rsi2_summary))
 
     for label, summary in detail_rows:
         if not summary:
@@ -189,7 +200,7 @@ def _spy_benchmark_pct(dc, start_date: str, end_date: str):
 def _run_period(
     label, start_date, end_date, *,
     tc, dc, rm, ucfg, tickers,
-    hu_intraday, hu_eod, cash, show_charts,
+    hu_intraday, hu_eod, hu_rsi2=None, hu_rsi2_short=None, cash, show_charts,
     strategies: frozenset = _ALL_STRATEGIES,
 ):
     """Run selected strategy backtests for one date range and print results."""
@@ -199,12 +210,14 @@ def _run_period(
     log.info(f"  Tickers:  {len(tickers)} stocks")
     log.info(f"  Period:   {start_date} -> {end_date}")
     log.info(f"  Capital:  ${cash:,.0f}")
+    log.info(f"  Strategies: {', '.join(sorted(strategies))}")
     log.info("")
 
     intraday_results: dict = {}
     eod_results:      dict = {}
     swing_results:    dict = {}
-    intraday = eod = swing = None
+    rsi2_results:     dict = {}
+    intraday = eod = swing = rsi2 = None
 
     # ── Intraday ──────────────────────────────────────────────────────────────
     if "intraday" in strategies:
@@ -263,9 +276,31 @@ def _run_period(
         except Exception as exc:
             log.exception(f"Swing backtest failed: {exc}")
 
-    # ── Summary + benchmark ───────────────────────────────────────────────────
+    # ── RSI-2 ─────────────────────────────────────────────────────────────────
+    if "rsi2" in strategies:
+        from strategies.strategy_rsi2 import Rsi2Strategy, Rsi2Config
+        from data_collection.stock_universe import Rsi2UniverseConfig
+        log.info("-" * 60)
+        log.info("  Running Rsi2Strategy.backtest()...")
+        log.info("-" * 60)
+        rsi2 = Rsi2Strategy(
+            trading_client=tc, data_client=dc, config=Rsi2Config(),
+            risk_manager=rm, universe_config=Rsi2UniverseConfig(),
+        )
+        try:
+            rsi2_results = rsi2.backtest(
+                tickers=tickers, start_date=start_date, end_date=end_date,
+                initial_cash=cash, historical_universes=hu_rsi2,
+                historical_universes_short=hu_rsi2_short,
+            )
+            rsi2.print_summary(rsi2_results)
+        except Exception as exc:
+            log.exception(f"RSI-2 backtest failed: {exc}")
+
+    # ── Combined + benchmark ──────────────────────────────────────────────────
     _print_combined_summary(
-        intraday_results, eod_results, cash, swing_results, strategies=strategies,
+        intraday_results, eod_results, cash, swing_results,
+        rsi2_results=rsi2_results, strategies=strategies,
     )
 
     spy_pct = _spy_benchmark_pct(dc, start_date, end_date)
@@ -277,6 +312,8 @@ def _run_period(
             parts.append(f"EOD {eod_results.get('summary', {}).get('total_return_pct', 0.0):+.2f}%")
         if "swing" in strategies:
             parts.append(f"Swing {swing_results.get('summary', {}).get('total_return_pct', 0.0):+.2f}%")
+        if "rsi2" in strategies:
+            parts.append(f"RSI-2 {rsi2_results.get('summary', {}).get('total_return_pct', 0.0):+.2f}%")
         print(f"  BENCHMARK — SPY buy & hold ({label}): {spy_pct:+.2f}%")
         print(f"    vs {' | vs '.join(parts)}")
         print("=" * 70 + "\n")
@@ -290,6 +327,7 @@ def _run_period(
             start_date=start_date,
             end_date=end_date,
             spy_return_pct=spy_pct,
+            rsi2_results=rsi2_results,
         )
         log.info(f"Trades saved to output/trades.db  (run_id={run_id})")
     except Exception as exc:
@@ -312,8 +350,13 @@ def _run_period(
                 swing.plot_backtest(swing_results)
             except Exception as exc:
                 log.warning(f"Swing plot failed: {exc}")
+        if rsi2 and rsi2_results:
+            try:
+                rsi2.plot_backtest(rsi2_results)
+            except Exception as exc:
+                log.warning(f"RSI-2 plot failed: {exc}")
 
-    return intraday_results, eod_results
+    return intraday_results, eod_results, rsi2_results
 
 
 # =============================================================================
@@ -335,10 +378,11 @@ def main() -> None:
                         help="Split the date range in half and report in-sample vs "
                              "out-of-sample separately (guards against overfitting).")
     parser.add_argument(
-        "--strategies", nargs="*",
-        choices=["intraday", "eod", "swing"], default=["intraday", "eod", "swing"],
-        help="Which strategies to backtest (default: all). "
-             "Examples: --strategies intraday  --strategies eod swing",
+        "--strategies", nargs="+",
+        choices=["intraday", "eod", "swing", "rsi2"],
+        default=["intraday", "eod", "swing", "rsi2"],
+        help="Which strategies to backtest (default: all four). "
+             "Use --strategies rsi2 to run only RSI-2 (fast, no minute-bar download).",
     )
     parser.add_argument(
         "--intraday-universe", default=None,
@@ -422,6 +466,32 @@ def main() -> None:
     else:
         log.warning(f"Could not find {eod_universe_path}. EOD backtest will use static universe.")
 
+    historical_universes_rsi2 = None
+    for rsi2_universe_path in [
+        os.path.join("output", "historical_universes_rsi2_bidir.json"),
+        os.path.join("output", "historical_universes_rsi2.json"),
+    ]:
+        if os.path.exists(rsi2_universe_path):
+            with open(rsi2_universe_path, "r") as f:
+                historical_universes_rsi2 = json.load(f)
+            log.info(f"Loaded RSI-2 PIT universes from {rsi2_universe_path}")
+            break
+    if historical_universes_rsi2 is None:
+        log.warning(
+            "Could not find RSI-2 PIT universe. "
+            "RSI-2 backtest will use static universe. "
+            "Run: python data_collection/build_historical_universes.py "
+            "--universe sp500 --out output/historical_universes_rsi2_bidir.json "
+            "--start <date> --end <date>"
+        )
+
+    historical_universes_rsi2_short = None
+    rsi2_short_path = os.path.join("output", "historical_universes_rsi2_short.json")
+    if os.path.exists(rsi2_short_path):
+        with open(rsi2_short_path) as f:
+            historical_universes_rsi2_short = json.load(f)
+        log.info(f"Loaded RSI-2 short universe from {rsi2_short_path}")
+
     # TEMPORARY VALIDATION — remove after confirming
     '''if historical_universes_intraday:
         weeks = sorted(historical_universes_intraday.keys())
@@ -444,7 +514,10 @@ def main() -> None:
     # ── Expand data download list to cover all historical tickers ─────────────
     if not args.tickers:
         unique_tickers = set()
-        for universe in [historical_universes_intraday, historical_universes_eod]:
+        for universe in [
+            historical_universes_intraday, historical_universes_eod,
+            historical_universes_rsi2, historical_universes_rsi2_short,
+        ]:
             if universe:
                 for week_list in universe.values():
                     unique_tickers.update(week_list)
@@ -475,6 +548,8 @@ def main() -> None:
             tc=tc, dc=dc, rm=rm, ucfg=ucfg, tickers=tickers,
             hu_intraday=historical_universes_intraday,
             hu_eod=historical_universes_eod,
+            hu_rsi2=historical_universes_rsi2,
+            hu_rsi2_short=historical_universes_rsi2_short,
             cash=cash, show_charts=show_charts,
             strategies=strategies,
         )

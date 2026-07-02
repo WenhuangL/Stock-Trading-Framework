@@ -122,7 +122,7 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_candidates_sym  ON scan_candidates(symbol);
         """)
 
-        # Migrate trades table — add indicator columns if not present (backward compat)
+        # Migrate tables — add columns if not present (backward compat)
         cursor = conn.cursor()
         for col, coltype in [
             ("vwap_at_entry",    "REAL"),
@@ -131,9 +131,21 @@ def init_db() -> None:
             ("vol_decay_ratio",  "REAL"),
             ("signal_vol_ratio", "REAL"),
             ("spy_regime",       "TEXT"),
+            ("rsi2_at_entry",    "REAL"),
         ]:
             try:
                 cursor.execute(f"ALTER TABLE trades ADD COLUMN {col} {coltype}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
+
+        for col, coltype in [
+            ("rsi2_final",      "REAL"),
+            ("rsi2_return_pct", "REAL"),
+            ("rsi2_trades",     "INTEGER"),
+            ("rsi2_win_rate",   "REAL"),
+        ]:
+            try:
+                cursor.execute(f"ALTER TABLE backtest_runs ADD COLUMN {col} {coltype}")
             except sqlite3.OperationalError:
                 pass  # column already exists
 
@@ -144,6 +156,7 @@ def save_run(
     start_date: str,
     end_date: str,
     spy_return_pct: Optional[float] = None,
+    rsi2_results: Optional[dict] = None,
 ) -> str:
     """
     Persist a complete backtest run to the database.
@@ -156,26 +169,37 @@ def save_run(
 
     intra_s      = intraday_results.get("summary", {})
     eod_s        = eod_results.get("summary", {}) if eod_results else {}
+    rsi2_s       = rsi2_results.get("summary", {}) if rsi2_results else {}
     intra_trades = intraday_results.get("trades", [])
     eod_trades   = eod_results.get("trades", [])
+    rsi2_trades  = rsi2_results.get("trades", []) if rsi2_results else []
 
     with _connect() as conn:
-        conn.execute(
-            "INSERT INTO backtest_runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                run_id, run_ts, start_date, end_date,
-                intra_s.get("initial_cash"),
-                intra_s.get("final_value"),
-                intra_s.get("total_return_pct"),
-                intra_s.get("num_trades"),
-                intra_s.get("win_rate_pct"),
-                eod_s.get("final_value"),
-                eod_s.get("total_return_pct"),
-                eod_s.get("num_trades"),
-                eod_s.get("win_rate_pct"),
+        conn.execute("""
+            INSERT INTO backtest_runs (
+                run_id, run_timestamp, start_date, end_date, initial_cash,
+                intraday_final, intraday_return_pct, intraday_trades, intraday_win_rate,
+                eod_final, eod_return_pct, eod_trades, eod_win_rate,
                 spy_return_pct,
-            ),
-        )
+                rsi2_final, rsi2_return_pct, rsi2_trades, rsi2_win_rate
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            run_id, run_ts, start_date, end_date,
+            intra_s.get("initial_cash"),
+            intra_s.get("final_value"),
+            intra_s.get("total_return_pct"),
+            intra_s.get("num_trades"),
+            intra_s.get("win_rate_pct"),
+            eod_s.get("final_value"),
+            eod_s.get("total_return_pct"),
+            eod_s.get("num_trades"),
+            eod_s.get("win_rate_pct"),
+            spy_return_pct,
+            rsi2_s.get("final_value"),
+            rsi2_s.get("total_return_pct"),
+            rsi2_s.get("num_trades"),
+            rsi2_s.get("win_rate_pct"),
+        ))
 
         rows = []
 
@@ -210,6 +234,7 @@ def save_run(
                 t.get("vol_decay_ratio"),
                 t.get("signal_vol_ratio"),
                 t.get("spy_regime"),
+                None,  # rsi2_at_entry
             ))
 
         for t in eod_trades:
@@ -234,6 +259,35 @@ def save_run(
                 t.get("pct_change_at_entry"),
                 1 if t.get("had_afterhours") else 0,
                 None, None, None, None, None, None,  # indicator cols (intraday only)
+                None,  # rsi2_at_entry
+            ))
+
+        for t in rsi2_trades:
+            entry_p = float(t.get("entry_price") or 0)
+            exit_p  = float(t.get("exit_price") or 0)
+            dirn    = t.get("direction", "long")
+            if entry_p > 0:
+                sign    = 1 if dirn == "long" else -1
+                pnl_pct = round(sign * (exit_p - entry_p) / entry_p * 100, 4)
+            else:
+                pnl_pct = None
+            rows.append((
+                run_id, "rsi2",
+                "rsi2",
+                str(t.get("date", "")),
+                t.get("symbol"),
+                dirn,
+                entry_p, exit_p,
+                None, None,
+                t.get("qty"),
+                t.get("pnl"),
+                pnl_pct,
+                t.get("exit_reason"),
+                t.get("days_held"),
+                None, None,
+                None, None, None,
+                None, None, None, None, None, None,  # indicator cols (intraday only)
+                t.get("rsi2_at_entry"),
             ))
 
         conn.executemany("""
@@ -244,8 +298,9 @@ def save_run(
                 entry_time, exit_time, spy_day_return,
                 daily_decline_pct, had_afterhours,
                 vwap_at_entry, atr_at_entry, dist_atr,
-                vol_decay_ratio, signal_vol_ratio, spy_regime
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                vol_decay_ratio, signal_vol_ratio, spy_regime,
+                rsi2_at_entry
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, rows)
 
         candidates = intraday_results.get("candidates", [])

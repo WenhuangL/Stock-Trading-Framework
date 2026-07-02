@@ -67,8 +67,8 @@ class LocalDataCache:
             date_str = start_pd.strftime("%Y%m%d")
             file_path = self.cache_dir / tf_folder / f"{api_symbol}_{date_str}_{feed}.parquet"
         else:
-            # Cache filename uses the normalized symbol so the dash/dot forms share one file.
-            file_path = self.cache_dir / tf_folder / f"{api_symbol}.parquet"
+            # Cache filename includes feed so SIP and IEX daily bars are stored separately.
+            file_path = self.cache_dir / tf_folder / f"{api_symbol}_{feed}.parquet"
 
         df = pd.DataFrame()
         needs_fetch = True
