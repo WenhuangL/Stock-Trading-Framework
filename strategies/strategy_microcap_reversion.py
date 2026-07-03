@@ -141,6 +141,23 @@ class MicrocapReversionConfig:
     rsi_buy_thresh: float = 10.0
     """RSI(2) < 10 confirms a short-term oversold extreme."""
 
+    min_close_off_low: float = 0.0
+    """Exhaustion condition: require the signal bar to close at least this
+    fraction off its low — (close - low) / (high - low) >= threshold.  A panic
+    day that closes ON its low is usually mid-cascade (sellers not done); a
+    close well off the low is the seller-exhaustion signature.  0 = disabled."""
+
+    # ── Quality gate (survivability by construction) ───────────────────────────
+    require_uptrend: bool = False
+    """Only buy names whose longer-term trend was UP before the panic:
+    SMA(trend_sma_fast) > SMA(trend_sma_slow).  A 2-3 day crash barely moves the
+    SMA(50), so this reads the pre-panic trend.  Companies in uptrends almost
+    never delist inside a 10-day hold, so this gate shrinks the survivorship
+    tail structurally instead of statistically — the 'quality pullback' variant."""
+
+    trend_sma_fast: int = 50
+    trend_sma_slow: int = 200
+
     # ── Niche 2: panic gap-down sympathy ───────────────────────────────────────
     enable_gap_sympathy: bool = True
     gap_threshold: float = 0.10
@@ -304,6 +321,23 @@ class MicrocapReversionStrategy:
     # SAFETY FILTERS
     # =========================================================================
 
+    def _min_bars(self) -> int:
+        """History required before a signal may evaluate.  The uptrend gate needs
+        the slow SMA warm; otherwise the base requirement applies."""
+        if self.cfg.require_uptrend:
+            return max(self.cfg.min_history_bars, self.cfg.trend_sma_slow + 10)
+        return self.cfg.min_history_bars
+
+    def _uptrend_ok(self, df: pd.DataFrame) -> bool:
+        """Pre-panic trend filter: SMA(fast) above SMA(slow)."""
+        if not self.cfg.require_uptrend:
+            return True
+        fast = float(calculate_sma(df, period=self.cfg.trend_sma_fast).iloc[-1])
+        slow = float(calculate_sma(df, period=self.cfg.trend_sma_slow).iloc[-1])
+        if np.isnan(fast) or np.isnan(slow):
+            return False
+        return fast > slow
+
     def _split_or_badtick(self, df: pd.DataFrame) -> bool:
         """True if a recent bar shows an implausible overnight up-jump — the raw,
         split-unadjusted signature of a reverse split or a bad tick."""
@@ -318,7 +352,9 @@ class MicrocapReversionStrategy:
         avg_dollar_vol) when the name is tradeable, else None."""
         if sym in self.cfg.symbol_blacklist:
             return None
-        if len(df) < self.cfg.min_history_bars:
+        if len(df) < self._min_bars():
+            return None
+        if not self._uptrend_ok(df):
             return None
 
         last_close = float(df["close"].iloc[-1])
@@ -374,6 +410,14 @@ class MicrocapReversionStrategy:
         last_rsi = float(rsi_ser.iloc[-1])
         if np.isnan(last_rsi) or last_rsi >= self.cfg.rsi_buy_thresh:
             return None
+
+        # Exhaustion: a close pinned to the day's low means sellers are not done.
+        if self.cfg.min_close_off_low > 0:
+            bar_high = float(df["high"].iloc[-1])
+            bar_low  = float(df["low"].iloc[-1])
+            rng = bar_high - bar_low
+            if rng <= 0 or (last_close - bar_low) / rng < self.cfg.min_close_off_low:
+                return None
 
         return {
             "symbol":         sym,
@@ -503,7 +547,8 @@ class MicrocapReversionStrategy:
 
         start_dt    = datetime.datetime.fromisoformat(start_date).replace(tzinfo=ET)
         end_dt      = datetime.datetime.fromisoformat(end_date).replace(tzinfo=ET)
-        fetch_start = start_dt - datetime.timedelta(days=self.cfg.min_history_bars + 120)
+        # ~1.5 calendar days per trading bar, plus buffer, so the warm-up is covered.
+        fetch_start = start_dt - datetime.timedelta(days=int(self._min_bars() * 1.6) + 90)
 
         fetch_tickers = list(tickers)
         if self.cfg.enable_gap_sympathy and self.cfg.peer_etf not in fetch_tickers:
@@ -695,7 +740,7 @@ class MicrocapReversionStrategy:
                         hist = daily_data[sym].loc[:day_str]
                     except KeyError:
                         continue
-                    if len(hist) < self.cfg.min_history_bars:
+                    if len(hist) < self._min_bars():
                         continue
                     # Only evaluate names whose latest bar is actually today.
                     if hist.index[-1].strftime("%Y-%m-%d") != day_str:
