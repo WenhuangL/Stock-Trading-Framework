@@ -254,12 +254,45 @@ class MicrocapReversionConfig:
     fill_retry_days: int = 1
     """A queued buy limit is retried for this many bars before being cancelled."""
 
+    use_dynamic_spread: bool = True
+    """Estimate each name's half-spread from its price and dollar volume instead
+    of charging the flat spread_pct.  A flat spread is the crudest thing in a
+    micro-cap fill model: it over-taxes the $5M+/day half of the universe (real
+    spreads ~0.3-1%) and under-taxes the thinnest names.  Set False to fall back
+    to the flat spread_pct."""
+
     spread_pct: float = 0.015
-    """Half-spread per fill (1.5%).  Micro-cap books are wide; charged on both
-    legs, so reversion must clear ~2 x this before profit."""
+    """FALLBACK flat half-spread per taker fill (used when use_dynamic_spread is
+    False).  Micro-cap books are wide; charged per leg."""
+
+    spread_coef: float = 7.5
+    """Dynamic model: half_spread_fraction = spread_coef / sqrt(consolidated
+    dollar volume).  7.5 calibrates to ~1.5% half-spread at $250k/day, ~0.75% at
+    $1M/day, ~0.24% at $10M/day — consistent with observed micro/small-cap
+    quoted spreads.  Only the product spread_coef / sqrt(iex_volume_multiplier)
+    matters given IEX inputs, so recalibrate either, not both."""
+
+    iex_volume_multiplier: float = 35.0
+    """Consolidated dollar volume estimated as IEX-slice dollar volume x this.
+    IEX carries ~2-3% of consolidated tape (noisier on micro-caps); 35x ~= 2.9%.
+    A paid SIP feed would replace this estimate with the true number."""
+
+    min_half_spread: float = 0.0015
+    max_half_spread: float = 0.05
+    """Clamps on the dynamic half-spread estimate (0.15% .. 5%).  The model also
+    floors at the exchange tick: half a cent / price."""
+
+    maker_penetration: float = 0.5
+    """A RESTING limit (maker entry below the market, target sell above) is only
+    assumed filled when price trades THROUGH it by this fraction of the name's
+    half-spread — touching your price doesn't guarantee your queue position gets
+    hit.  Applied to offset entries and target exits; marketable (offset=0)
+    entries keep the plain touch rule."""
 
     slippage_pct: float = 0.005
-    """Additional slippage per fill (0.5%)."""
+    """Additional slippage per TAKER fill (0.5%).  Maker fills execute at the
+    resting limit price — the limit is the price — so no slippage is charged on
+    them; the penetration requirement above is their honesty cost."""
 
     commission_per_trade: float = 0.0
 
@@ -327,6 +360,23 @@ class MicrocapReversionStrategy:
         if self.cfg.require_uptrend:
             return max(self.cfg.min_history_bars, self.cfg.trend_sma_slow + 10)
         return self.cfg.min_history_bars
+
+    def _half_spread(self, price: float, iex_dollar_vol: float) -> float:
+        """Per-name half-spread estimate (fraction of price).
+
+        half_spread = spread_coef / sqrt(consolidated_dollar_volume), floored at
+        the exchange tick (half a cent over price) and clamped to
+        [min_half_spread, max_half_spread].  Falls back to the flat spread_pct
+        when use_dynamic_spread is False or inputs are unusable.
+        """
+        if not self.cfg.use_dynamic_spread:
+            return self.cfg.spread_pct
+        if price <= 0 or iex_dollar_vol is None or iex_dollar_vol <= 0:
+            return self.cfg.max_half_spread
+        consolidated = iex_dollar_vol * self.cfg.iex_volume_multiplier
+        hs = self.cfg.spread_coef / np.sqrt(consolidated)
+        hs = max(hs, 0.005 / price)  # tick floor: half a $0.01 tick
+        return float(min(max(hs, self.cfg.min_half_spread), self.cfg.max_half_spread))
 
     def _uptrend_ok(self, df: pd.DataFrame) -> bool:
         """Pre-panic trend filter: SMA(fast) above SMA(slow)."""
@@ -567,8 +617,6 @@ class MicrocapReversionStrategy:
         pending_entries: dict[str, dict] = {}
         open_pos:        list[dict]      = []
 
-        slip = self.cfg.slippage_pct + self.cfg.spread_pct
-
         for day in trading_days:
             day_str = day.strftime("%Y-%m-%d")
 
@@ -612,12 +660,19 @@ class MicrocapReversionStrategy:
                 bar_open = float(today_bar["open"].iloc[0])
                 bar_low  = float(today_bar["low"].iloc[0])
                 limit    = pend["limit"]
+                hs       = pend["hs"]
+                is_maker = self.cfg.entry_limit_offset_pct > 0
 
-                if bar_low <= limit:
-                    # Limit is marketable: price-improve to the open if it gapped
-                    # below the limit, otherwise fill at the limit.
+                # Maker: a resting limit below the market must be traded THROUGH
+                # (by maker_penetration x half-spread) before we believe the fill.
+                # Taker (offset 0): plain touch rule, but the fill crosses the
+                # spread and pays slippage.
+                fill_level = limit * (1 - self.cfg.maker_penetration * hs) if is_maker else limit
+
+                if bar_low <= fill_level:
+                    # Price-improve to the open if it gapped below the limit.
                     raw_fill = bar_open if bar_open <= limit else limit
-                    ep = raw_fill * (1 + slip)          # buy at ask
+                    ep = raw_fill if is_maker else raw_fill * (1 + hs + self.cfg.slippage_pct)
                     budget = portfolio_value * self.cfg.position_size_pct
                     qty    = int(budget // ep)
                     active_count = len([p for p in open_pos if not p["closed"]])
@@ -647,6 +702,7 @@ class MicrocapReversionStrategy:
                         "decline_pct":         sig.get("decline_pct", 0.0),
                         "dollar_vol":          sig.get("dollar_vol", 0.0),
                         "rsi2_at_entry":       sig.get("rsi2", 0.0),
+                        "hs":                  hs,
                     }
                     open_pos.append(pos)
                     cash -= qty * ep
@@ -677,6 +733,8 @@ class MicrocapReversionStrategy:
                 ep        = pos["entry_price"]
                 sl        = pos["sl_price"]
                 tgt       = pos["target_price"]
+                pos_hs    = pos.get("hs", self.cfg.spread_pct)
+                taker     = pos_hs + self.cfg.slippage_pct  # cost of demanding liquidity
 
                 def _exit(exit_price: float, reason: str) -> None:
                     pnl = (exit_price - ep) * pos["qty"] - self.cfg.commission_per_trade
@@ -685,26 +743,27 @@ class MicrocapReversionStrategy:
                     pos.update(closed=True, exit_price=round(exit_price, 4), exit_reason=reason)
                     all_trades.append(self._trade_record(pos, day_str, pnl))
 
-                # 2A: pending SMA-reversion exit queued yesterday — sell at open (bid)
+                # 2A: pending SMA-reversion exit queued yesterday — taker at open
                 if pos["pending_exit"]:
-                    _exit(bar_open * (1 - slip), pos["pending_exit_reason"])
+                    _exit(bar_open * (1 - taker), pos["pending_exit_reason"])
                     continue
 
                 # 2B: gap stop — open gaps below stop (+ deterministic halt haircut)
                 if bar_open <= sl:
                     halt = self.cfg.halt_slippage_pct if self.cfg.model_halts else 0.0
-                    _exit(bar_open * (1 - slip - halt), "gap_stop")
+                    _exit(bar_open * (1 - taker - halt), "gap_stop")
                     continue
 
                 # 2C: intraday hard stop — assumed BEFORE the target (pessimistic)
                 if bar_low <= sl:
-                    _exit(sl * (1 - slip), "stop_loss")
+                    _exit(sl * (1 - taker), "stop_loss")
                     continue
 
-                # 2D: reversion target — the winner path (sell at target/bid)
-                if bar_high >= tgt:
-                    raw = bar_open if bar_open >= tgt else tgt
-                    _exit(raw * (1 - slip), "target")
+                # 2D: reversion target — a RESTING limit sell (maker).  Fills at
+                # its own price, no spread charge, but price must trade through
+                # it by the penetration fraction of the half-spread.
+                if bar_high >= tgt * (1 + self.cfg.maker_penetration * pos_hs):
+                    _exit(bar_open if bar_open >= tgt else tgt, "target")
                     continue
 
                 # 2E: SMA(exit_sma) reversion — queue a next-open exit
@@ -720,10 +779,10 @@ class MicrocapReversionStrategy:
                         pos["pending_exit_reason"] = "sma_exit"
                         continue
 
-                # 2F: time stop — sell at close (bid)
+                # 2F: time stop — taker at close
                 pos["days_held"] += 1
                 if pos["days_held"] >= self.cfg.max_hold_days:
-                    _exit(bar_close * (1 - slip), "time_stop")
+                    _exit(bar_close * (1 - taker), "time_stop")
 
             open_pos = [p for p in open_pos if not p["closed"]]
 
@@ -763,7 +822,12 @@ class MicrocapReversionStrategy:
                     if sym in open_symbols:
                         continue
                     limit = sig["signal_price"] * (1 - self.cfg.entry_limit_offset_pct)
-                    pending_entries[sym] = {"sig": sig, "limit": round(limit, 4), "days_pending": 0}
+                    pending_entries[sym] = {
+                        "sig":          sig,
+                        "limit":        round(limit, 4),
+                        "hs":           self._half_spread(sig["signal_price"], sig.get("dollar_vol", 0.0)),
+                        "days_pending": 0,
+                    }
                     open_symbols.add(sym)
                     open_count += 1
 
@@ -818,6 +882,7 @@ class MicrocapReversionStrategy:
             "decline_pct":   pos.get("decline_pct", 0.0),
             "dollar_vol":    pos.get("dollar_vol", 0.0),
             "rsi2_at_entry": pos.get("rsi2_at_entry", 0.0),
+            "hs_at_entry":   round(pos.get("hs", 0.0), 5),
         }
 
     # =========================================================================
@@ -935,6 +1000,8 @@ class MicrocapReversionStrategy:
             "num_signals":        num_signals,
             "num_filled":         num_filled,
             "fill_rate_pct":      round(num_filled / num_signals * 100, 1) if num_signals else 0.0,
+            "avg_half_spread_pct": round(
+                float(np.mean([t.get("hs_at_entry", 0.0) for t in trades])) * 100, 3),
             "exit_reason_counts": exit_counts,
         }
 
